@@ -1,0 +1,23 @@
+{
+  "name": "timesheet-2",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=@timesheet/web\" \"npm run dev --workspace=@timesheet/api\"",
+    "dev:web": "npm run dev --workspace=@timesheet/web",
+    "dev:api": "npm run dev --workspace=@timesheet/api",
+    "db:generate": "npm run db:generate --workspace=@timesheet/api",
+    "db:migrate": "npm run db:migrate --workspace=@timesheet/api",
+    "test:api": "npm run test --workspace=@timesheet/api",
+    "build": "npm run build --workspace=@timesheet/web",
+    "typecheck": "npm run typecheck --workspace=@timesheet/web && npm run typecheck --workspace=@timesheet/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2"
+  }
+}
