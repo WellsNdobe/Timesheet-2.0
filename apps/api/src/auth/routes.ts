@@ -4,7 +4,7 @@ import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
 import { env } from "../config.js";
 import { db } from "../db/client.js";
-import { authSessions, users } from "../db/schema.js";
+import { authSessions, users, workspaceMemberships, workspaces } from "../db/schema.js";
 import { ApiError, asyncHandler } from "../errors.js";
 import { authenticate } from "./middleware.js";
 import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
@@ -16,12 +16,17 @@ import {
   refreshTokenTtlMs,
 } from "./tokens.js";
 import { toPublicUser } from "./user.js";
+import { acceptInvitationForUser } from "../workspaces/routes.js";
 
 const refreshCookieName = "refresh_token";
 
 const credentialsSchema = z.object({
   email: z.string().trim().toLowerCase().email().max(320),
   password: z.string().min(8).max(128),
+}).strict();
+
+const registrationSchema = credentialsSchema.extend({
+  inviteToken: z.string().min(20).max(512).optional(),
 }).strict();
 
 const refreshCookieOptions: CookieOptions = {
@@ -84,7 +89,11 @@ export const authRouter = Router();
 authRouter.use(limiter);
 
 authRouter.post("/register", asyncHandler(async (request, response) => {
-  const credentials = parseCredentials(request.body);
+  const parsedRegistration = registrationSchema.safeParse(request.body);
+  if (!parsedRegistration.success) {
+    throw new ApiError(400, "validation_error", "A valid email and a password of 8 to 128 characters are required.");
+  }
+  const credentials = parsedRegistration.data;
   const passwordHash = await hashPassword(credentials.password);
 
   try {
@@ -93,6 +102,17 @@ authRouter.post("/register", asyncHandler(async (request, response) => {
         .insert(users)
         .values({ email: credentials.email, passwordHash })
         .returning({ id: users.id, email: users.email, createdAt: users.createdAt });
+
+      const [workspace] = await transaction.insert(workspaces).values({
+        name: `${user.email.split("@")[0]}\'s workspace`,
+        timezone: "Africa/Johannesburg",
+        createdByUserId: user.id,
+      }).returning({ id: workspaces.id });
+      await transaction.insert(workspaceMemberships).values({ workspaceId: workspace.id, userId: user.id, role: "admin" });
+
+      if (credentials.inviteToken) {
+        await acceptInvitationForUser(transaction, { id: user.id, email: user.email }, credentials.inviteToken);
+      }
 
       const refreshToken = createRefreshToken();
       await transaction.insert(authSessions).values({

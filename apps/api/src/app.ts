@@ -4,6 +4,8 @@ import express from "express";
 import { authRouter } from "./auth/routes.js";
 import { env } from "./config.js";
 import { errorHandler, notFoundHandler } from "./errors.js";
+import { timesheetRouter } from "./timesheets/routes.js";
+import { workspaceRouter } from "./workspaces/routes.js";
 
 export const app = express();
 
@@ -21,5 +23,7 @@ app.get("/api/hello", (_request, response) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/workspaces", workspaceRouter);
+app.use("/api", timesheetRouter);
 app.use(notFoundHandler);
 app.use(errorHandler);
