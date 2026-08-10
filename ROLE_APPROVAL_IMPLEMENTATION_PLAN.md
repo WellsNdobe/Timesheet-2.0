@@ -188,6 +188,8 @@ Make role permissions consistent and independently testable before adding workfl
 
 ### ✅ END IMPLEMENTED — PHASE 1
 
+### ✅ IMPLEMENTED — PHASE 2
+
 ## Phase 2 — Project approver configuration and safeguards
 
 ### Goal
@@ -223,6 +225,18 @@ Guarantee that every submitted project portion can be routed to an eligible pers
 
 - Orphaned approval items cannot be created.
 - Existing pending assignments cannot silently change.
+
+### Implementation and verification recorded
+
+- [x] Approver eligibility, self-approval, structured readiness errors, and shared-approver submissions are enforced.
+- [x] Workspace governance locking serializes membership eligibility, project assignment, submission, and decision flows.
+- [x] Project/task authorization is atomic and nested resource isolation uses non-disclosing `404` responses.
+- [x] `npm run typecheck --workspace=@timesheet/api` passed.
+- [x] `npm run test:api` passed.
+
+### ✅ END IMPLEMENTED — PHASE 2
+
+### ✅ IMPLEMENTED — PHASE 3
 
 ## Phase 3 — Versioned approval revisions and derived weekly state
 
@@ -262,6 +276,17 @@ Create the durable state model required for safe resubmission and audit history.
 - No resubmission overwrites history.
 - The weekly status never contradicts its project statuses.
 
+### Implementation and verification recorded
+
+- [x] Stable approval items retain legacy identifiers and store append-only numbered revisions.
+- [x] Legacy events and the recoverable current snapshot migrate to revision 1 without claiming unrecoverable history.
+- [x] Revision-specific snapshots, events, withdrawn revisions, and derived weekly states are implemented.
+- [x] Revision-specific decision endpoints reject stale and non-latest actions.
+- [x] `npm run typecheck --workspace=@timesheet/api` passed.
+- [x] `npm run test:api` passed: 11 tests.
+
+### ✅ END IMPLEMENTED — PHASE 3
+
 ## Phase 4 — Approval decisions, transfers, and Admin override semantics
 
 ### Goal
@@ -276,7 +301,7 @@ Expose complete, auditable backend actions before building the approval interfac
 - Admin can approve a pending revision assigned to someone else with a required internal override reason.
 - Enforce self-approval rules.
 - Separate member-facing comments from internal administrative reasons.
-- Add explicit event types for resubmission, transfer, and Admin override.
+- Add explicit event types for transfer and Admin override. Resubmission is already recorded in Phase 3.
 
 ### Out of scope
 

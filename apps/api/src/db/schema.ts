@@ -3,9 +3,9 @@ import { bigint, boolean, check, date, index, integer, pgEnum, pgTable, text, ti
 
 export const workspaceRoleEnum = pgEnum("workspace_role", ["admin", "manager", "member"]);
 export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "accepted", "revoked"]);
-export const timesheetStatusEnum = pgEnum("timesheet_status", ["draft", "submitted", "changes_requested", "approved"]);
-export const projectReviewStatusEnum = pgEnum("project_review_status", ["pending", "approved", "changes_requested"]);
-export const reviewEventTypeEnum = pgEnum("review_event_type", ["submitted", "approved", "changes_requested"]);
+export const timesheetStatusEnum = pgEnum("timesheet_status", ["draft", "in_review", "changes_requested", "partially_approved", "approved"]);
+export const approvalRevisionStatusEnum = pgEnum("approval_revision_status", ["pending", "approved", "changes_requested", "withdrawn"]);
+export const reviewEventTypeEnum = pgEnum("review_event_type", ["submitted", "resubmitted", "approved", "changes_requested", "withdrawn"]);
 
 export const users = pgTable(
   "users",
@@ -165,15 +165,29 @@ export const timeEntries = pgTable(
   ],
 );
 
-export const timesheetProjectReviews = pgTable(
-  "timesheet_project_reviews",
+export const timesheetApprovalItems = pgTable(
+  "timesheet_approval_items",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     weeklyTimesheetId: bigint("weekly_timesheet_id", { mode: "number" }).notNull().references(() => weeklyTimesheets.id, { onDelete: "cascade" }),
     projectId: bigint("project_id", { mode: "number" }).notNull().references(() => projects.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("timesheet_approval_items_timesheet_project_unique").on(table.weeklyTimesheetId, table.projectId),
+  ],
+);
+
+export const timesheetApprovalRevisions = pgTable(
+  "timesheet_approval_revisions",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    approvalItemId: bigint("approval_item_id", { mode: "number" }).notNull().references(() => timesheetApprovalItems.id, { onDelete: "cascade" }),
+    revisionNumber: integer("revision_number").notNull(),
     approverMembershipId: bigint("approver_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id),
     projectName: text("project_name").notNull(),
-    status: projectReviewStatusEnum("status").notNull().default("pending"),
+    status: approvalRevisionStatusEnum("status").notNull().default("pending"),
     submittedMinutes: integer("submitted_minutes").notNull(),
     submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
@@ -183,8 +197,11 @@ export const timesheetProjectReviews = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("timesheet_project_reviews_timesheet_project_unique").on(table.weeklyTimesheetId, table.projectId),
-    index("timesheet_project_reviews_approver_status_index").on(table.approverMembershipId, table.status, table.submittedAt),
+    uniqueIndex("timesheet_approval_revisions_item_number_unique").on(table.approvalItemId, table.revisionNumber),
+    uniqueIndex("timesheet_approval_revisions_one_pending_item_unique").on(table.approvalItemId).where(sql`${table.status} = 'pending'`),
+    index("timesheet_approval_revisions_approver_status_index").on(table.approverMembershipId, table.status, table.submittedAt),
+    check("timesheet_approval_revisions_number_positive", sql`${table.revisionNumber} > 0`),
+    check("timesheet_approval_revisions_minutes_valid", sql`(${table.status} = 'withdrawn' and ${table.submittedMinutes} = 0) or (${table.status} <> 'withdrawn' and ${table.submittedMinutes} > 0)`),
   ],
 );
 
@@ -192,20 +209,20 @@ export const timesheetReviewEvents = pgTable(
   "timesheet_review_events",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-    reviewId: bigint("review_id", { mode: "number" }).notNull().references(() => timesheetProjectReviews.id, { onDelete: "cascade" }),
+    revisionId: bigint("revision_id", { mode: "number" }).notNull().references(() => timesheetApprovalRevisions.id, { onDelete: "cascade" }),
     actorMembershipId: bigint("actor_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
     type: reviewEventTypeEnum("type").notNull(),
     comment: text("comment"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("timesheet_review_events_review_index").on(table.reviewId, table.createdAt)],
+  (table) => [index("timesheet_review_events_revision_index").on(table.revisionId, table.createdAt)],
 );
 
 export const timesheetReviewEntrySnapshots = pgTable(
   "timesheet_review_entry_snapshots",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-    reviewId: bigint("review_id", { mode: "number" }).notNull().references(() => timesheetProjectReviews.id, { onDelete: "cascade" }),
+    revisionId: bigint("revision_id", { mode: "number" }).notNull().references(() => timesheetApprovalRevisions.id, { onDelete: "cascade" }),
     sourceEntryId: bigint("source_entry_id", { mode: "number" }).notNull(),
     taskId: bigint("task_id", { mode: "number" }),
     taskName: text("task_name"),
@@ -219,7 +236,7 @@ export const timesheetReviewEntrySnapshots = pgTable(
   },
   (table) => [
     check("timesheet_review_entry_snapshots_duration_positive", sql`${table.durationMinutes} > 0`),
-    index("timesheet_review_entry_snapshots_review_index").on(table.reviewId, table.workDate),
+    index("timesheet_review_entry_snapshots_revision_index").on(table.revisionId, table.workDate),
   ],
 );
 

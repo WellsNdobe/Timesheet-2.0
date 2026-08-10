@@ -102,7 +102,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   await db.delete(schema.timesheetReviewEntrySnapshots);
   await db.delete(schema.timesheetReviewEvents);
-  await db.delete(schema.timesheetProjectReviews);
+  await db.delete(schema.timesheetApprovalRevisions);
+  await db.delete(schema.timesheetApprovalItems);
   await db.delete(schema.timeEntries);
   await db.delete(schema.weeklyTimesheets);
   await db.delete(schema.tasks);
@@ -269,20 +270,22 @@ describe.sequential("role authorization", () => {
 
   it("scopes approvals to assigned Managers while allowing Admin read access", async () => {
     const fixture = await createRoleFixture();
-    const [sheet] = await db.insert(schema.weeklyTimesheets).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, weekStart: "2026-08-03", status: "submitted", submittedAt: new Date() }).returning();
-    const [assignedReview] = await db.insert(schema.timesheetProjectReviews).values({ weeklyTimesheetId: sheet.id, projectId: fixture.assignedProject.id, approverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 120, status: "pending" }).returning();
-    const [unassignedReview] = await db.insert(schema.timesheetProjectReviews).values({ weeklyTimesheetId: sheet.id, projectId: fixture.adminProject.id, approverMembershipId: fixture.admin.membership.id, projectName: fixture.adminProject.name, submittedMinutes: 60, status: "pending" }).returning();
+    const [sheet] = await db.insert(schema.weeklyTimesheets).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, weekStart: "2026-08-03", status: "in_review", submittedAt: new Date() }).returning();
+    const [assignedItem] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.assignedProject.id }).returning();
+    const [unassignedItem] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.adminProject.id }).returning();
+    const [assignedReview] = await db.insert(schema.timesheetApprovalRevisions).values({ approvalItemId: assignedItem.id, revisionNumber: 1, approverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 120, status: "pending" }).returning();
+    await db.insert(schema.timesheetApprovalRevisions).values({ approvalItemId: unassignedItem.id, revisionNumber: 1, approverMembershipId: fixture.admin.membership.id, projectName: fixture.adminProject.name, submittedMinutes: 60, status: "pending" });
 
     const managerApprovals = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals`).set(auth(fixture.manager.token));
     const adminApprovals = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals`).set(auth(fixture.admin.token));
     const memberApprovals = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals`).set(auth(fixture.member.token));
-    const managerAssignedDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${assignedReview.id}`).set(auth(fixture.manager.token));
-    const managerUnassignedDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${unassignedReview.id}`).set(auth(fixture.manager.token));
-    const adminUnassignedDecision = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${assignedReview.id}/approve`).set(auth(fixture.admin.token)).send({});
+    const managerAssignedDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${assignedItem.id}`).set(auth(fixture.manager.token));
+    const managerUnassignedDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${unassignedItem.id}`).set(auth(fixture.manager.token));
+    const adminUnassignedDecision = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${assignedItem.id}/revisions/${assignedReview.id}/approve`).set(auth(fixture.admin.token)).send({});
 
     expect(managerApprovals.status).toBe(200);
     expect(managerApprovals.body.approvals).toHaveLength(1);
-    expect(managerApprovals.body.approvals[0].id).toBe(String(assignedReview.id));
+    expect(managerApprovals.body.approvals[0].id).toBe(String(assignedItem.id));
     expect(adminApprovals.status).toBe(200);
     expect(adminApprovals.body.approvals).toHaveLength(2);
     expect(memberApprovals.status).toBe(403);
@@ -291,6 +294,42 @@ describe.sequential("role authorization", () => {
     expect(managerUnassignedDetail.status).toBe(404);
     expect(adminUnassignedDecision.status).toBe(403);
     expect(adminUnassignedDecision.body.error.code).toBe("insufficient_permissions");
+  });
+
+  it("creates immutable revisions and reports project-specific submission readiness", async () => {
+    const fixture = await createRoleFixture();
+    await db.update(schema.projects).set({ approverMembershipId: fixture.manager.membership.id }).where(eq(schema.projects.id, fixture.adminProject.id));
+    const [assignedEntry] = await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-03", durationMinutes: 60 }).returning();
+    await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.adminProject.id, workDate: "2026-08-04", durationMinutes: 30 });
+
+    const initial = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    expect(initial.status).toBe(200);
+    expect(initial.body.status).toBe("in_review");
+    expect(initial.body.revisions).toHaveLength(2);
+    const revision = initial.body.revisions.find((item: { projectId: string }) => item.projectId === String(fixture.assignedProject.id));
+
+    const returned = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${revision.approvalItemId}/revisions/${revision.revisionId}/request-changes`).set(auth(fixture.manager.token)).send({ comment: "Please add detail" });
+    expect(returned.status).toBe(200);
+    expect(returned.body.timesheetStatus).toBe("changes_requested");
+    const changed = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/time-entries/${assignedEntry.id}`).set(auth(fixture.member.token)).send({ durationMinutes: 90 });
+    expect(changed.status).toBe(200);
+
+    const resubmitted = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    expect(resubmitted.status).toBe(200);
+    expect(resubmitted.body.revisions).toHaveLength(1);
+    expect(resubmitted.body.revisions[0].revisionNumber).toBe(2);
+    const detail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${revision.approvalItemId}`).set(auth(fixture.manager.token));
+    expect(detail.status).toBe(200);
+    expect(detail.body.approval.revisions).toHaveLength(2);
+    expect(detail.body.approval.revisions[1].status).toBe("changes_requested");
+    expect(detail.body.approval.revisions[1].entries[0].durationMinutes).toBe(60);
+
+    const [unassignedProject] = await db.insert(schema.projects).values({ workspaceId: fixture.workspaceId, name: "Needs approver" }).returning();
+    await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: unassignedProject.id, workDate: "2026-08-10", durationMinutes: 30 });
+    const notReady = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-10/submit`).set(auth(fixture.member.token)).send({});
+    expect(notReady.status).toBe(409);
+    expect(notReady.body.error.code).toBe("submission_not_ready");
+    expect(notReady.body.error.details.projects).toEqual(expect.arrayContaining([expect.objectContaining({ projectId: String(unassignedProject.id), reason: "missing_approver" })]));
   });
 
   it("protects inactive and cross-workspace memberships and preserves the last Admin", async () => {

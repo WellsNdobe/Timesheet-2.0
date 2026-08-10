@@ -5,6 +5,7 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    public readonly details?: unknown,
   ) {
     super(message);
   }
@@ -24,12 +25,13 @@ export const notFoundHandler: RequestHandler = (_request, response) => {
 
 export const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
   if (error instanceof ApiError) {
-    response.status(error.status).json({ error: { code: error.code, message: error.message } });
+    response.status(error.status).json({ error: { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) } });
     return;
   }
 
   console.error("Unhandled API error", {
     name: error instanceof Error ? error.name : "UnknownError",
+    message: error instanceof Error ? error.message : undefined,
   });
   response.status(500).json({
     error: { code: "internal_error", message: "An unexpected error occurred." },
