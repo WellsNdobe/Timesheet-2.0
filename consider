@@ -1,0 +1,29 @@
+The structure is directionally solid. The biggest risk is that the UI is clearer than the underlying **approval state model**. Before building screens, I’d lock down these gaps:
+
+1. **Define the approval item as a versioned object.** I’d make the canonical unit something like `submitter + week + project + revision`. A resubmission should not overwrite the original snapshot; it should create revision 2 while preserving revision 1, the change-request comment, timestamps, and reviewer. Otherwise the audit trail becomes surprisingly weak.
+
+2. **Clarify the weekly timesheet’s own status.** Your example says `This week — Submitted` while one project has “Changes requested.” That becomes contradictory because part of the week is editable again. I’d derive the weekly state from its project portions: `Draft → In review → Changes requested / Partially approved → Approved`. Project statuses remain the authoritative detail.
+
+3. **Decide what happens when the approver changes mid-review.** This is probably the most important missing rule. An approval should snapshot its assigned approver when submitted. Changing the project’s configured approver should **not silently rewrite existing approvals**. Admins should explicitly transfer pending approvals, producing an audit event such as “Transferred from Alex to Priya by Sam.”
+
+4. **Handle self-approval explicitly.** Managers and Admins may also enter time. If Maia is the approver for Atlas and submits her own Atlas time, can she approve it? I’d prohibit self-approval and route it to a designated fallback Admin or require reassignment. This is where “exactly one approver” starts becoming brittle; you may eventually want one primary approver plus a controlled fallback rather than two equal approvers.
+
+5. **Define the missing-approver failure state.** Legacy projects, role changes, deactivations, imports, or configuration mistakes can leave a project without an eligible approver. Submission must not produce an orphaned approval. Either block that project portion with a clear configuration error or route it to a documented Admin fallback.
+
+6. **Separate three different Admin powers.** “Override” is currently ambiguous. There is a meaningful difference between an Admin **approving a pending item assigned to another person**, **reassigning the pending item**, and **reopening/reversing an already-approved item**. I’d model those as separate actions. Reversing an approval is especially sensitive if approved time feeds invoicing, payroll, exports, or other downstream processes.
+
+7. **Specify exactly what becomes editable after Request changes.** Your project-level locking model is good, but make it explicit: Northstar stays immutable; only the Atlas slice unlocks. Within Atlas, can the member edit every entry, add/delete entries, change the project, or only alter entries called out by the reviewer? I’d allow edits within that project-week slice but prevent moving entries into an already-approved project without creating a new approval consequence.
+
+8. **Add a resubmission diff.** On revision 2, the approver shouldn’t have to reconstruct what Maia changed. The detail view should identify added, removed, and changed entries and retain the previous submitted snapshot. That will make “Request changes → correct → resubmit” dramatically better at scale.
+
+9. **Separate the actionable inbox from approval history.** “My approvals” should default to Pending, but Managers will eventually need to find something they approved yesterday or a change request they sent last week. I’d keep the primary queue focused on actionable items, with a History/status filter available to Managers too. The sidebar badge should count **actionable pending approvals only**; a changes-requested item should disappear until resubmitted.
+
+10. **Make notifications part of the workflow, not an afterthought.** Submission/resubmission should notify the assigned approver; Request changes should notify the member with the comment; approval should notify the member; transfer/reassignment should notify the new approver. Otherwise the new Approvals area becomes something people have to remember to poll.
+
+There are also two permission details I’d treat as non-negotiable. A Manager opening an approval must only receive that **project slice**, not unrelated projects from the same employee’s weekly timesheet. And all of the Manager/Admin scoping needs to be enforced by the API—not merely by hiding sidebar routes in the frontend.
+
+One other subtlety is comments. I’d distinguish **member-facing reviewer comments** from **internal audit reasons**. A Request changes comment is explicitly for the member. An Admin’s override/reassignment reason may belong in the administrative audit log and may not necessarily need to be exposed as a conversational comment to the member.
+
+If I were reducing this to the four decisions that need resolving before frontend implementation, they would be: **revision semantics, self-approval, approver reassignment, and what an Admin override actually means**. Once those are explicit, the two-screen UI you described maps cleanly onto the model.
+
+Because this is currently a conceptual flow rather than a captured product screen, I haven’t treated this as a screenshot-based UX audit; that would need the actual running surface in Work.

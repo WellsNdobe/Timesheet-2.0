@@ -15,6 +15,17 @@ import {
   workspaces,
 } from "../db/schema.js";
 import { ApiError, asyncHandler } from "../errors.js";
+import {
+  insufficientPermissions,
+  notFound,
+  parseResourceId,
+  requireAdmin,
+  requireAssignedApprover,
+  requireAssignedProjectManager,
+  requireManagerOrAdmin,
+  requireWorkspaceMembership,
+  type WorkspaceMembership,
+} from "../workspaces/access.js";
 
 const idSchema = z.coerce.number().int().positive();
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
@@ -39,27 +50,12 @@ const entrySchema = z.object({
 });
 const reviewDecisionSchema = z.object({ comment: z.string().trim().min(1).max(2_000).optional() }).strict();
 
-type Membership = { id: number; workspaceId: number; userId: number; role: "admin" | "manager" | "member"; isActive: boolean };
-
 const parse = <T>(schema: z.ZodType<T>, value: unknown): T => {
   const result = schema.safeParse(value);
   if (!result.success) throw new ApiError(400, "validation_error", result.error.issues[0]?.message ?? "Invalid request.");
   return result.data;
 };
-const paramId = (value: string | undefined) => parse(idSchema, value);
-const notFound = () => new ApiError(404, "not_found", "The requested resource was not found.");
-const forbidden = () => new ApiError(403, "forbidden", "You do not have permission to perform this action.");
-const actorId = (response: Parameters<Parameters<typeof asyncHandler>[0]>[1]) => Number(response.locals.authUser.id);
-
-const membershipFor = async (workspaceId: number, userId: number): Promise<Membership> => {
-  const [membership] = await db.select({ id: workspaceMemberships.id, workspaceId: workspaceMemberships.workspaceId, userId: workspaceMemberships.userId, role: workspaceMemberships.role, isActive: workspaceMemberships.isActive })
-    .from(workspaceMemberships).where(and(eq(workspaceMemberships.workspaceId, workspaceId), eq(workspaceMemberships.userId, userId), eq(workspaceMemberships.isActive, true))).limit(1);
-  if (!membership) throw notFound();
-  return membership;
-};
-const requireManager = (membership: Membership) => {
-  if (membership.role === "member") throw forbidden();
-};
+const paramId = (value: string | string[] | undefined) => parseResourceId(value);
 const requireWorkspace = async (workspaceId: number) => {
   const [workspace] = await db.select({ id: workspaces.id, timezone: workspaces.timezone }).from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1);
   if (!workspace) throw notFound();
@@ -100,14 +96,14 @@ export const timesheetRouter = Router();
 timesheetRouter.use(authenticate);
 
 timesheetRouter.get("/workspaces/:workspaceId/projects", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); await membershipFor(workspaceId, actorId(response));
+  const workspaceId = paramId(request.params.workspaceId); await requireWorkspaceMembership(response, workspaceId);
   const includeArchived = request.query.includeArchived === "true";
   const rows = await db.select().from(projects).where(and(eq(projects.workspaceId, workspaceId), ...(includeArchived ? [] : [eq(projects.isArchived, false)]) )).orderBy(asc(projects.name));
   response.json({ projects: rows.map((row) => ({ ...row, id: String(row.id), workspaceId: String(row.workspaceId), approverMembershipId: row.approverMembershipId == null ? null : String(row.approverMembershipId), createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() })) });
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/projects", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); requireManager(member);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); requireAdmin(member);
   const input = parse(projectSchema, request.body);
   if (input.approverMembershipId != null) {
     const [approver] = await db.select().from(workspaceMemberships).where(and(eq(workspaceMemberships.id, input.approverMembershipId), eq(workspaceMemberships.workspaceId, workspaceId), eq(workspaceMemberships.isActive, true), ne(workspaceMemberships.role, "member"))).limit(1);
@@ -118,8 +114,12 @@ timesheetRouter.post("/workspaces/:workspaceId/projects", asyncHandler(async (re
 }));
 
 timesheetRouter.patch("/workspaces/:workspaceId/projects/:projectId", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); requireManager(member);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId);
   const projectId = paramId(request.params.projectId); const input = parse(projectSchema.partial().extend({ isArchived: z.boolean().optional() }).strict(), request.body);
+  const [existingProject] = await db.select().from(projects).where(and(eq(projects.id, projectId), eq(projects.workspaceId, workspaceId))).limit(1);
+  if (!existingProject) throw notFound();
+  requireAssignedProjectManager(member, existingProject);
+  if (member.role === "manager" && (input.approverMembershipId !== undefined || input.isArchived !== undefined)) throw insufficientPermissions();
   if (input.approverMembershipId !== undefined && input.approverMembershipId != null) {
     const [approver] = await db.select({ id: workspaceMemberships.id }).from(workspaceMemberships).where(and(eq(workspaceMemberships.id, input.approverMembershipId), eq(workspaceMemberships.workspaceId, workspaceId), eq(workspaceMemberships.isActive, true), ne(workspaceMemberships.role, "member"))).limit(1);
     if (!approver) throw new ApiError(400, "invalid_approver", "Approver must be an active manager or admin in this workspace.");
@@ -129,7 +129,7 @@ timesheetRouter.patch("/workspaces/:workspaceId/projects/:projectId", asyncHandl
 }));
 
 timesheetRouter.get("/workspaces/:workspaceId/projects/:projectId/tasks", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); await membershipFor(workspaceId, actorId(response)); const projectId = paramId(request.params.projectId);
+  const workspaceId = paramId(request.params.workspaceId); await requireWorkspaceMembership(response, workspaceId); const projectId = paramId(request.params.projectId);
   await validateEntryReferences(workspaceId, projectId, undefined, true);
   const includeArchived = request.query.includeArchived === "true";
   const rows = await db.select().from(tasks).where(and(eq(tasks.projectId, projectId), ...(includeArchived ? [] : [eq(tasks.isArchived, false)]) )).orderBy(asc(tasks.name));
@@ -137,19 +137,19 @@ timesheetRouter.get("/workspaces/:workspaceId/projects/:projectId/tasks", asyncH
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/projects/:projectId/tasks", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); requireManager(member); const projectId = paramId(request.params.projectId); await validateEntryReferences(workspaceId, projectId);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const projectId = paramId(request.params.projectId); const project = await validateEntryReferences(workspaceId, projectId, undefined); requireAssignedProjectManager(member, project);
   const input = parse(taskSchema, request.body); const [task] = await db.insert(tasks).values({ projectId, name: input.name }).returning();
   response.status(201).json({ task: { ...task, id: String(task.id), projectId: String(task.projectId), createdAt: task.createdAt.toISOString(), updatedAt: task.updatedAt.toISOString() } });
 }));
 
 timesheetRouter.patch("/workspaces/:workspaceId/projects/:projectId/tasks/:taskId", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); requireManager(member); const projectId = paramId(request.params.projectId); const taskId = paramId(request.params.taskId); const input = parse(taskSchema.partial().extend({ isArchived: z.boolean().optional() }).strict(), request.body);
-  await validateEntryReferences(workspaceId, projectId, undefined, true); const [task] = await db.update(tasks).set({ ...input, updatedAt: new Date() }).where(and(eq(tasks.id, taskId), eq(tasks.projectId, projectId))).returning(); if (!task) throw notFound();
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const projectId = paramId(request.params.projectId); const taskId = paramId(request.params.taskId); const input = parse(taskSchema.partial().extend({ isArchived: z.boolean().optional() }).strict(), request.body);
+  const project = await validateEntryReferences(workspaceId, projectId, undefined, true); requireAssignedProjectManager(member, project); const [task] = await db.update(tasks).set({ ...input, updatedAt: new Date() }).where(and(eq(tasks.id, taskId), eq(tasks.projectId, projectId))).returning(); if (!task) throw notFound();
   response.json({ task: { ...task, id: String(task.id), projectId: String(task.projectId), createdAt: task.createdAt.toISOString(), updatedAt: task.updatedAt.toISOString() } });
 }));
 
 timesheetRouter.get("/workspaces/:workspaceId/time-entries", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); const workspace = await requireWorkspace(workspaceId); const weekStart = parse(weekSchema, request.query.weekStart); const end = weekEnd(weekStart);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const workspace = await requireWorkspace(workspaceId); const weekStart = parse(weekSchema, request.query.weekStart); const end = weekEnd(weekStart);
   const entries = await db.select().from(timeEntries).where(and(eq(timeEntries.workspaceId, workspaceId), eq(timeEntries.membershipId, member.id), gte(timeEntries.workDate, weekStart), lt(timeEntries.workDate, end))).orderBy(asc(timeEntries.workDate), asc(timeEntries.createdAt));
   const dailyTotals = entries.reduce<Record<string, number>>((totals, entry) => { totals[entry.workDate] = (totals[entry.workDate] ?? 0) + entry.durationMinutes; return totals; }, {});
   const billableMinutes = entries.filter((entry) => entry.isBillable).reduce((total, entry) => total + entry.durationMinutes, 0);
@@ -158,7 +158,7 @@ timesheetRouter.get("/workspaces/:workspaceId/time-entries", asyncHandler(async 
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/time-entries", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); const input = parse(entrySchema, request.body);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const input = parse(entrySchema, request.body);
   const entry = await db.transaction(async (transaction) => {
     await lockMemberEntries(transaction, workspaceId, member.id);
     await validateEntryReferences(workspaceId, input.projectId, input.taskId);
@@ -170,7 +170,7 @@ timesheetRouter.post("/workspaces/:workspaceId/time-entries", asyncHandler(async
 }));
 
 timesheetRouter.patch("/workspaces/:workspaceId/time-entries/:entryId", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); const entryId = paramId(request.params.entryId); const input = parse(entrySchema.partial(), request.body);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const entryId = paramId(request.params.entryId); const input = parse(entrySchema.partial(), request.body);
   const entry = await db.transaction(async (transaction) => {
     await lockMemberEntries(transaction, workspaceId, member.id);
     const [existing] = await transaction.select().from(timeEntries).where(and(eq(timeEntries.id, entryId), eq(timeEntries.workspaceId, workspaceId), eq(timeEntries.membershipId, member.id))).limit(1); if (!existing) throw notFound(); await assertMutable(existing);
@@ -187,7 +187,7 @@ timesheetRouter.patch("/workspaces/:workspaceId/time-entries/:entryId", asyncHan
 }));
 
 timesheetRouter.delete("/workspaces/:workspaceId/time-entries/:entryId", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); const entryId = paramId(request.params.entryId);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const entryId = paramId(request.params.entryId);
   await db.transaction(async (transaction) => {
     await lockMemberEntries(transaction, workspaceId, member.id);
     const [entry] = await transaction.select().from(timeEntries).where(and(eq(timeEntries.id, entryId), eq(timeEntries.workspaceId, workspaceId), eq(timeEntries.membershipId, member.id))).limit(1); if (!entry) throw notFound(); await assertMutable(entry); await transaction.delete(timeEntries).where(eq(timeEntries.id, entryId));
@@ -204,7 +204,7 @@ const updateSheetStatus = async (transaction: DbTransaction, sheetId: number) =>
   return status;
 };
 
-const assertSelfReviewAllowed = async (transaction: DbTransaction, workspaceId: number, submitterMembershipId: number, reviewerMembershipId: number, reviewerRole: Membership["role"]) => {
+const assertSelfReviewAllowed = async (transaction: DbTransaction, workspaceId: number, submitterMembershipId: number, reviewerMembershipId: number, reviewerRole: WorkspaceMembership["role"]) => {
   if (submitterMembershipId !== reviewerMembershipId) return;
   if (reviewerRole !== "admin") throw new ApiError(403, "self_review_not_allowed", "Only a sole workspace admin may review their own week.");
   const activeMembers = await transaction.select({ count: sql<number>`count(*)::int` }).from(workspaceMemberships)
@@ -213,7 +213,7 @@ const assertSelfReviewAllowed = async (transaction: DbTransaction, workspaceId: 
 };
 
 timesheetRouter.post("/workspaces/:workspaceId/timesheets/:weekStart/submit", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); const weekStart = parse(weekSchema, request.params.weekStart); const end = weekEnd(weekStart);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); const weekStart = parse(weekSchema, request.params.weekStart); const end = weekEnd(weekStart);
   await db.transaction(async (transaction) => {
     await lockMemberEntries(transaction, workspaceId, member.id);
     const entries = await transaction.select().from(timeEntries).where(and(eq(timeEntries.workspaceId, workspaceId), eq(timeEntries.membershipId, member.id), gte(timeEntries.workDate, weekStart), lt(timeEntries.workDate, end)));
@@ -243,13 +243,13 @@ timesheetRouter.post("/workspaces/:workspaceId/timesheets/:weekStart/submit", as
 }));
 
 timesheetRouter.get("/workspaces/:workspaceId/approvals", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const member = await membershipFor(workspaceId, actorId(response)); requireManager(member);
+  const workspaceId = paramId(request.params.workspaceId); const member = await requireWorkspaceMembership(response, workspaceId); requireManagerOrAdmin(member);
   const rows = await db.select({ review: timesheetProjectReviews, sheet: weeklyTimesheets, project: projects }).from(timesheetProjectReviews).innerJoin(weeklyTimesheets, eq(timesheetProjectReviews.weeklyTimesheetId, weeklyTimesheets.id)).innerJoin(projects, eq(timesheetProjectReviews.projectId, projects.id)).where(and(eq(weeklyTimesheets.workspaceId, workspaceId), member.role === "admin" ? sql`true` : eq(timesheetProjectReviews.approverMembershipId, member.id))).orderBy(desc(timesheetProjectReviews.submittedAt));
   response.json({ approvals: rows.map(({ review, sheet, project }) => ({ id: String(review.id), status: review.status, submittedMinutes: review.submittedMinutes, submittedAt: review.submittedAt.toISOString(), resolvedAt: review.resolvedAt?.toISOString() ?? null, returnComment: review.returnComment, project: { id: String(project.id), name: review.projectName }, weekStart: sheet.weekStart, submitterMembershipId: String(sheet.membershipId) })) });
 }));
 
 timesheetRouter.get("/workspaces/:workspaceId/approval-items/:reviewId", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const actor = await membershipFor(workspaceId, actorId(response)); requireManager(actor); const reviewId = paramId(request.params.reviewId);
+  const workspaceId = paramId(request.params.workspaceId); const actor = await requireWorkspaceMembership(response, workspaceId); requireManagerOrAdmin(actor); const reviewId = paramId(request.params.reviewId);
   const [row] = await db.select({ review: timesheetProjectReviews, sheet: weeklyTimesheets, project: projects }).from(timesheetProjectReviews).innerJoin(weeklyTimesheets, eq(timesheetProjectReviews.weeklyTimesheetId, weeklyTimesheets.id)).innerJoin(projects, eq(timesheetProjectReviews.projectId, projects.id)).where(and(eq(timesheetProjectReviews.id, reviewId), eq(weeklyTimesheets.workspaceId, workspaceId), actor.role === "admin" ? sql`true` : eq(timesheetProjectReviews.approverMembershipId, actor.id))).limit(1);
   if (!row) throw notFound();
   const entries = await db.select().from(timesheetReviewEntrySnapshots).where(eq(timesheetReviewEntrySnapshots.reviewId, reviewId)).orderBy(asc(timesheetReviewEntrySnapshots.workDate), asc(timesheetReviewEntrySnapshots.createdAt));
@@ -258,11 +258,11 @@ timesheetRouter.get("/workspaces/:workspaceId/approval-items/:reviewId", asyncHa
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/approval-items/:reviewId/approve", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const actor = await membershipFor(workspaceId, actorId(response)); requireManager(actor); const reviewId = paramId(request.params.reviewId); parse(reviewDecisionSchema, request.body ?? {});
+  const workspaceId = paramId(request.params.workspaceId); const actor = await requireWorkspaceMembership(response, workspaceId); requireManagerOrAdmin(actor); const reviewId = paramId(request.params.reviewId); parse(reviewDecisionSchema, request.body ?? {});
   await db.transaction(async (transaction) => {
     const [row] = await transaction.select({ review: timesheetProjectReviews, sheet: weeklyTimesheets }).from(timesheetProjectReviews).innerJoin(weeklyTimesheets, eq(timesheetProjectReviews.weeklyTimesheetId, weeklyTimesheets.id)).where(and(eq(timesheetProjectReviews.id, reviewId), eq(weeklyTimesheets.workspaceId, workspaceId))).limit(1); if (!row) throw notFound();
     if (row.review.status !== "pending") throw new ApiError(409, "invalid_review_state", "Only pending reviews can be approved.");
-    if (actor.role !== "admin" && row.review.approverMembershipId !== actor.id) throw notFound();
+    requireAssignedApprover(actor, row.review.approverMembershipId);
     await assertSelfReviewAllowed(transaction, workspaceId, row.sheet.membershipId, actor.id, actor.role);
     const [changed] = await transaction.update(timesheetProjectReviews).set({ status: "approved", resolvedAt: new Date(), resolvedByMembershipId: actor.id, updatedAt: new Date() }).where(and(eq(timesheetProjectReviews.id, reviewId), eq(timesheetProjectReviews.status, "pending"))).returning({ id: timesheetProjectReviews.id });
     if (!changed) throw new ApiError(409, "invalid_review_state", "This review was already resolved.");
@@ -271,9 +271,9 @@ timesheetRouter.post("/workspaces/:workspaceId/approval-items/:reviewId/approve"
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/approval-items/:reviewId/request-changes", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const actor = await membershipFor(workspaceId, actorId(response)); requireManager(actor); const reviewId = paramId(request.params.reviewId); const input = parse(z.object({ comment: z.string().trim().min(1).max(2_000) }).strict(), request.body);
+  const workspaceId = paramId(request.params.workspaceId); const actor = await requireWorkspaceMembership(response, workspaceId); requireManagerOrAdmin(actor); const reviewId = paramId(request.params.reviewId); const input = parse(z.object({ comment: z.string().trim().min(1).max(2_000) }).strict(), request.body);
   await db.transaction(async (transaction) => {
-    const [row] = await transaction.select({ review: timesheetProjectReviews, sheet: weeklyTimesheets }).from(timesheetProjectReviews).innerJoin(weeklyTimesheets, eq(timesheetProjectReviews.weeklyTimesheetId, weeklyTimesheets.id)).where(and(eq(timesheetProjectReviews.id, reviewId), eq(weeklyTimesheets.workspaceId, workspaceId))).limit(1); if (!row) throw notFound(); if (row.review.status !== "pending") throw new ApiError(409, "invalid_review_state", "Only pending reviews can be returned."); if (actor.role !== "admin" && row.review.approverMembershipId !== actor.id) throw notFound(); await assertSelfReviewAllowed(transaction, workspaceId, row.sheet.membershipId, actor.id, actor.role);
+    const [row] = await transaction.select({ review: timesheetProjectReviews, sheet: weeklyTimesheets }).from(timesheetProjectReviews).innerJoin(weeklyTimesheets, eq(timesheetProjectReviews.weeklyTimesheetId, weeklyTimesheets.id)).where(and(eq(timesheetProjectReviews.id, reviewId), eq(weeklyTimesheets.workspaceId, workspaceId))).limit(1); if (!row) throw notFound(); if (row.review.status !== "pending") throw new ApiError(409, "invalid_review_state", "Only pending reviews can be returned."); requireAssignedApprover(actor, row.review.approverMembershipId); await assertSelfReviewAllowed(transaction, workspaceId, row.sheet.membershipId, actor.id, actor.role);
     const [changed] = await transaction.update(timesheetProjectReviews).set({ status: "changes_requested", resolvedAt: new Date(), resolvedByMembershipId: actor.id, returnComment: input.comment, updatedAt: new Date() }).where(and(eq(timesheetProjectReviews.id, reviewId), eq(timesheetProjectReviews.status, "pending"))).returning({ id: timesheetProjectReviews.id });
     if (!changed) throw new ApiError(409, "invalid_review_state", "This review was already resolved.");
     await transaction.insert(timesheetReviewEvents).values({ reviewId, actorMembershipId: actor.id, type: "changes_requested", comment: input.comment }); const status = await updateSheetStatus(transaction, row.sheet.id); response.json({ id: String(reviewId), status: "changes_requested", timesheetStatus: status });

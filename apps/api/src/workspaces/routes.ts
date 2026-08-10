@@ -50,9 +50,9 @@ const getTargetMembership = async (workspaceId: number, membershipId: number) =>
   return membership;
 };
 
-const assertMembershipCanChange = async (workspaceId: number, target: { id: number; role: WorkspaceRole }, nextRole?: WorkspaceRole) => {
+const assertMembershipCanChange = async (transaction: DatabaseTransaction, workspaceId: number, target: { id: number; role: WorkspaceRole }, nextRole?: WorkspaceRole) => {
   if (target.role === "admin" && nextRole !== "admin") {
-    const [admins] = await db.select({ value: count() }).from(workspaceMemberships).where(and(
+    const [admins] = await transaction.select({ value: count() }).from(workspaceMemberships).where(and(
       eq(workspaceMemberships.workspaceId, workspaceId),
       eq(workspaceMemberships.role, "admin"),
       eq(workspaceMemberships.isActive, true),
@@ -63,7 +63,7 @@ const assertMembershipCanChange = async (workspaceId: number, target: { id: numb
   }
 
   if (nextRole && ["admin", "manager"].includes(nextRole)) return;
-  const [pending] = await db.select({ value: count() }).from(timesheetProjectReviews).where(and(
+  const [pending] = await transaction.select({ value: count() }).from(timesheetProjectReviews).where(and(
     eq(timesheetProjectReviews.approverMembershipId, target.id),
     eq(timesheetProjectReviews.status, "pending"),
   ));
@@ -146,7 +146,7 @@ workspaceRouter.patch("/:workspaceId/members/:membershipId", asyncHandler(async 
     await transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId})`);
     const [target] = await transaction.select().from(workspaceMemberships).where(and(eq(workspaceMemberships.id, id), eq(workspaceMemberships.workspaceId, workspaceId))).limit(1);
     if (!target) throw new ApiError(404, "not_found", "The requested resource was not found.");
-    await assertMembershipCanChange(workspaceId, target as { id: number; role: WorkspaceRole }, role);
+    await assertMembershipCanChange(transaction, workspaceId, target as { id: number; role: WorkspaceRole }, role);
     const [updated] = await transaction.update(workspaceMemberships).set({ role, updatedAt: new Date() }).where(eq(workspaceMemberships.id, id)).returning();
     return updated;
   });
@@ -162,7 +162,7 @@ workspaceRouter.delete("/:workspaceId/members/:membershipId", asyncHandler(async
     await transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId})`);
     const [target] = await transaction.select().from(workspaceMemberships).where(and(eq(workspaceMemberships.id, id), eq(workspaceMemberships.workspaceId, workspaceId))).limit(1);
     if (!target) throw new ApiError(404, "not_found", "The requested resource was not found.");
-    await assertMembershipCanChange(workspaceId, target as { id: number; role: WorkspaceRole });
+    await assertMembershipCanChange(transaction, workspaceId, target as { id: number; role: WorkspaceRole });
     await transaction.update(workspaceMemberships).set({ isActive: false, updatedAt: new Date() }).where(eq(workspaceMemberships.id, id));
   });
   response.status(204).send();

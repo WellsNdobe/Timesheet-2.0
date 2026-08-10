@@ -15,14 +15,23 @@ export type WorkspaceMembership = {
   isActive: boolean;
 };
 
-export const parseWorkspaceId = (value: string) => {
-  const id = Number(value);
+export type ProjectAccess = {
+  approverMembershipId: number | null;
+};
+
+export const notFound = () => new ApiError(404, "not_found", "The requested resource was not found.");
+export const insufficientPermissions = () => new ApiError(403, "insufficient_permissions", "You do not have permission to perform this action.");
+
+export const parseWorkspaceId = (value: string | string[] | undefined) => {
+  const id = Number(Array.isArray(value) ? value[0] : value);
   if (!Number.isSafeInteger(id) || id < 1) {
-    throw new ApiError(404, "not_found", "The requested resource was not found.");
+    throw notFound();
   }
 
   return id;
 };
+
+export const parseResourceId = parseWorkspaceId;
 
 export const requireWorkspaceMembership = async (response: Response, workspaceId: number): Promise<WorkspaceMembership> => {
   const userId = Number(response.locals.authUser.id);
@@ -51,6 +60,22 @@ export const requireWorkspaceMembership = async (response: Response, workspaceId
 
 export const requireRole = (membership: WorkspaceMembership, ...roles: WorkspaceRole[]) => {
   if (!roles.includes(membership.role)) {
-    throw new ApiError(403, "insufficient_permissions", "You do not have permission to perform this action.");
+    throw insufficientPermissions();
   }
+};
+
+export const requireAdmin = (membership: WorkspaceMembership) => requireRole(membership, "admin");
+export const requireManagerOrAdmin = (membership: WorkspaceMembership) => requireRole(membership, "admin", "manager");
+
+export const requireAssignedProjectManager = (membership: WorkspaceMembership, project: ProjectAccess) => {
+  if (membership.role === "admin") return;
+  requireRole(membership, "manager");
+  if (project.approverMembershipId !== membership.id) throw notFound();
+};
+
+export const requireAssignedApprover = (membership: WorkspaceMembership, approverMembershipId: number) => {
+  requireManagerOrAdmin(membership);
+  if (approverMembershipId === membership.id) return;
+  if (membership.role === "admin") throw insufficientPermissions();
+  throw notFound();
 };
