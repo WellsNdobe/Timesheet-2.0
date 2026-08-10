@@ -29,6 +29,13 @@
       "when": 1786350000000,
       "tag": "0003_versioned_approval_revisions",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786436400000,
+      "tag": "0004_admin_approval_actions",
+      "breakpoints": true
     }
   ]
 }

@@ -3,7 +3,7 @@ import "./auth.css";
 
 type AuthMode = "signup" | "login";
 
-type AuthResponse = {
+export type AuthResponse = {
   accessToken: string;
   user: { id: string; email: string; createdAt: string };
 };

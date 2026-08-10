@@ -311,7 +311,7 @@ Expose complete, auditable backend actions before building the approval interfac
 
 ### Automated tests
 
-- Only the snapshotted approver or Admin can open and resolve an item.
+- Only the current assigned approver or Admin can open an item; the assigned approver resolves normally and an unassigned Admin uses the audited override action.
 - Manager receives only the assigned project slice.
 - Change request without a comment fails.
 - Transfer and Admin override without reasons fail.
@@ -326,6 +326,15 @@ Expose complete, auditable backend actions before building the approval interfac
 ### Exit criteria
 
 - All approval mutations have explicit authorization, state transitions, and audit events.
+
+### Implementation prepared — validation pending
+
+- [x] Normal approval and required-comment change requests operate on the latest assigned revision.
+- [x] Admin transfer preserves the submitted approver snapshot, changes only the current assignment, and records old/new approvers plus an internal reason.
+- [x] Admin override requires an internal reason and records a separate audit event without populating member-facing comments.
+- [x] Internal administrative reasons are returned only to Admins.
+- [x] Reviewer findings for withdrawal, all-withdrawn restart, revision mismatch, and deterministic event ordering are addressed.
+- [ ] Automated validation remains pending because this turn did not explicitly authorize test or typecheck commands.
 
 ## Phase 5 — Frontend test foundation and role-aware navigation
 
@@ -363,6 +372,15 @@ Create the smallest frontend foundation needed to test role-specific screens.
 ### Exit criteria
 
 - Role-aware navigation behaves predictably and has component coverage.
+
+### Implementation prepared — validation pending
+
+- [x] Authenticated sessions retain and restore access tokens before protected workspace requests.
+- [x] Active workspace role and authorization-scoped pending approval count drive navigation.
+- [x] Member, Manager, and Admin sidebar destinations are derived from the role matrix.
+- [x] Direct routes render explicit access-denied or not-found states without protected page content.
+- [x] Vitest, Testing Library, jsdom, and MSW component-test foundations and role-navigation cases are configured.
+- [ ] Automated validation remains pending because this turn did not explicitly authorize test, typecheck, lint, or build commands.
 
 ## Phase 6 — Approvals inbox
 

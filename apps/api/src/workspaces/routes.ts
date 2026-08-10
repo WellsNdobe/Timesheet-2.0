@@ -64,7 +64,7 @@ const assertMembershipCanChange = async (transaction: DatabaseTransaction, works
 
   if (nextRole && ["admin", "manager"].includes(nextRole)) return;
   const [pending] = await transaction.select({ value: count() }).from(timesheetApprovalRevisions).where(and(
-    eq(timesheetApprovalRevisions.approverMembershipId, target.id),
+    eq(timesheetApprovalRevisions.assignedApproverMembershipId, target.id),
     eq(timesheetApprovalRevisions.status, "pending"),
   ));
   if (Number(pending?.value ?? 0) > 0) {

@@ -5,7 +5,7 @@ export const workspaceRoleEnum = pgEnum("workspace_role", ["admin", "manager", "
 export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "accepted", "revoked"]);
 export const timesheetStatusEnum = pgEnum("timesheet_status", ["draft", "in_review", "changes_requested", "partially_approved", "approved"]);
 export const approvalRevisionStatusEnum = pgEnum("approval_revision_status", ["pending", "approved", "changes_requested", "withdrawn"]);
-export const reviewEventTypeEnum = pgEnum("review_event_type", ["submitted", "resubmitted", "approved", "changes_requested", "withdrawn"]);
+export const reviewEventTypeEnum = pgEnum("review_event_type", ["submitted", "resubmitted", "approved", "changes_requested", "withdrawn", "transferred", "admin_override"]);
 
 export const users = pgTable(
   "users",
@@ -186,6 +186,7 @@ export const timesheetApprovalRevisions = pgTable(
     approvalItemId: bigint("approval_item_id", { mode: "number" }).notNull().references(() => timesheetApprovalItems.id, { onDelete: "cascade" }),
     revisionNumber: integer("revision_number").notNull(),
     approverMembershipId: bigint("approver_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id),
+    assignedApproverMembershipId: bigint("assigned_approver_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id),
     projectName: text("project_name").notNull(),
     status: approvalRevisionStatusEnum("status").notNull().default("pending"),
     submittedMinutes: integer("submitted_minutes").notNull(),
@@ -199,9 +200,11 @@ export const timesheetApprovalRevisions = pgTable(
   (table) => [
     uniqueIndex("timesheet_approval_revisions_item_number_unique").on(table.approvalItemId, table.revisionNumber),
     uniqueIndex("timesheet_approval_revisions_one_pending_item_unique").on(table.approvalItemId).where(sql`${table.status} = 'pending'`),
-    index("timesheet_approval_revisions_approver_status_index").on(table.approverMembershipId, table.status, table.submittedAt),
+    index("timesheet_approval_revisions_approver_status_index").on(table.assignedApproverMembershipId, table.status, table.submittedAt),
     check("timesheet_approval_revisions_number_positive", sql`${table.revisionNumber} > 0`),
     check("timesheet_approval_revisions_minutes_valid", sql`(${table.status} = 'withdrawn' and ${table.submittedMinutes} = 0) or (${table.status} <> 'withdrawn' and ${table.submittedMinutes} > 0)`),
+    check("timesheet_approval_revisions_resolution_valid", sql`(${table.status} = 'pending' and ${table.resolvedAt} is null and ${table.resolvedByMembershipId} is null) or (${table.status} <> 'pending' and ${table.resolvedAt} is not null and ${table.resolvedByMembershipId} is not null)`),
+    check("timesheet_approval_revisions_return_comment_valid", sql`(${table.status} = 'changes_requested' and ${table.returnComment} is not null and length(trim(${table.returnComment})) > 0) or (${table.status} <> 'changes_requested' and ${table.returnComment} is null)`),
   ],
 );
 
@@ -213,6 +216,9 @@ export const timesheetReviewEvents = pgTable(
     actorMembershipId: bigint("actor_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
     type: reviewEventTypeEnum("type").notNull(),
     comment: text("comment"),
+    internalReason: text("internal_reason"),
+    previousApproverMembershipId: bigint("previous_approver_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
+    nextApproverMembershipId: bigint("next_approver_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("timesheet_review_events_revision_index").on(table.revisionId, table.createdAt)],

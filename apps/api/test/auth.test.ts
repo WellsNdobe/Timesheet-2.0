@@ -273,10 +273,11 @@ describe.sequential("role authorization", () => {
     const [sheet] = await db.insert(schema.weeklyTimesheets).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, weekStart: "2026-08-03", status: "in_review", submittedAt: new Date() }).returning();
     const [assignedItem] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.assignedProject.id }).returning();
     const [unassignedItem] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.adminProject.id }).returning();
-    const [assignedReview] = await db.insert(schema.timesheetApprovalRevisions).values({ approvalItemId: assignedItem.id, revisionNumber: 1, approverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 120, status: "pending" }).returning();
-    await db.insert(schema.timesheetApprovalRevisions).values({ approvalItemId: unassignedItem.id, revisionNumber: 1, approverMembershipId: fixture.admin.membership.id, projectName: fixture.adminProject.name, submittedMinutes: 60, status: "pending" });
+    const [assignedReview] = await db.insert(schema.timesheetApprovalRevisions).values({ approvalItemId: assignedItem.id, revisionNumber: 1, approverMembershipId: fixture.manager.membership.id, assignedApproverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 120, status: "pending" }).returning();
+    await db.insert(schema.timesheetApprovalRevisions).values({ approvalItemId: unassignedItem.id, revisionNumber: 1, approverMembershipId: fixture.admin.membership.id, assignedApproverMembershipId: fixture.admin.membership.id, projectName: fixture.adminProject.name, submittedMinutes: 60, status: "pending" });
 
     const managerApprovals = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals`).set(auth(fixture.manager.token));
+    const managerPendingCount = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals/pending-count`).set(auth(fixture.manager.token));
     const adminApprovals = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals`).set(auth(fixture.admin.token));
     const memberApprovals = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals`).set(auth(fixture.member.token));
     const managerAssignedDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${assignedItem.id}`).set(auth(fixture.manager.token));
@@ -286,6 +287,7 @@ describe.sequential("role authorization", () => {
     expect(managerApprovals.status).toBe(200);
     expect(managerApprovals.body.approvals).toHaveLength(1);
     expect(managerApprovals.body.approvals[0].id).toBe(String(assignedItem.id));
+    expect(managerPendingCount.body.count).toBe(1);
     expect(adminApprovals.status).toBe(200);
     expect(adminApprovals.body.approvals).toHaveLength(2);
     expect(memberApprovals.status).toBe(403);
@@ -330,6 +332,31 @@ describe.sequential("role authorization", () => {
     expect(notReady.status).toBe(409);
     expect(notReady.body.error.code).toBe("submission_not_ready");
     expect(notReady.body.error.details.projects).toEqual(expect.arrayContaining([expect.objectContaining({ projectId: String(unassignedProject.id), reason: "missing_approver" })]));
+  });
+
+  it("audits Admin transfers and override approvals without changing the submitted approver snapshot", async () => {
+    const fixture = await createRoleFixture();
+    await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-03", durationMinutes: 60 });
+    const submitted = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    const approval = submitted.body.revisions[0];
+
+    const missingReason = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/transfer`).set(auth(fixture.admin.token)).send({ approverMembershipId: fixture.admin.membership.id });
+    expect(missingReason.status).toBe(400);
+    const transferred = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/transfer`).set(auth(fixture.admin.token)).send({ approverMembershipId: fixture.admin.membership.id, reason: "Manager is unavailable" });
+    expect(transferred.status).toBe(200);
+    const [storedAfterTransfer] = await db.select().from(schema.timesheetApprovalRevisions).where(eq(schema.timesheetApprovalRevisions.id, Number(approval.revisionId)));
+    expect(storedAfterTransfer.approverMembershipId).toBe(fixture.manager.membership.id);
+    expect(storedAfterTransfer.assignedApproverMembershipId).toBe(fixture.admin.membership.id);
+
+    await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/transfer`).set(auth(fixture.admin.token)).send({ approverMembershipId: fixture.manager.membership.id, reason: "Manager returned" });
+    const overridden = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/approve-as-admin`).set(auth(fixture.admin.token)).send({ reason: "Payroll cutoff" });
+    expect(overridden.status).toBe(200);
+    const events = await db.select().from(schema.timesheetReviewEvents).where(eq(schema.timesheetReviewEvents.revisionId, Number(approval.revisionId)));
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "transferred", internalReason: "Manager is unavailable", previousApproverMembershipId: fixture.manager.membership.id, nextApproverMembershipId: fixture.admin.membership.id }), expect.objectContaining({ type: "admin_override", internalReason: "Payroll cutoff" })]));
+    const managerDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}`).set(auth(fixture.manager.token));
+    const adminDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}`).set(auth(fixture.admin.token));
+    expect(managerDetail.body.approval.revisions[0].events.find((event: { type: string }) => event.type === "admin_override")).not.toHaveProperty("internalReason");
+    expect(adminDetail.body.approval.revisions[0].events.find((event: { type: string }) => event.type === "admin_override").internalReason).toBe("Payroll cutoff");
   });
 
   it("protects inactive and cross-workspace memberships and preserves the last Admin", async () => {
