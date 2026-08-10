@@ -1,0 +1,26 @@
+export type PageKey = "Overview" | "Time entries" | "Projects" | "Reports" | "Clients" | "Settings";
+
+export type IconName =
+  | "grid"
+  | "clock"
+  | "folder"
+  | "chart"
+  | "users"
+  | "settings"
+  | "search"
+  | "filter"
+  | "list"
+  | "more"
+  | "chevron"
+  | "chevron-left"
+  | "chevron-right"
+  | "calendar"
+  | "play"
+  | "pause"
+  | "arrow"
+  | "check"
+  | "warning"
+  | "plus"
+  | "help"
+  | "close"
+  | "bell";
