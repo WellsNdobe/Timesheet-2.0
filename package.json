@@ -13,7 +13,11 @@
     "db:migrate": "npm run db:migrate --workspace=@timesheet/api",
     "test:api": "npm run test --workspace=@timesheet/api",
     "build": "npm run build --workspace=@timesheet/web",
-    "typecheck": "npm run typecheck --workspace=@timesheet/web && npm run typecheck --workspace=@timesheet/api"
+    "typecheck": "npm run typecheck --workspace=@timesheet/web && npm run typecheck --workspace=@timesheet/api",
+    "lint": "npm run lint --workspace=@timesheet/web",
+    "lint:fix": "npm run lint:fix --workspace=@timesheet/web",
+    "format": "npm run format --workspace=@timesheet/web",
+    "format:check": "npm run format:check --workspace=@timesheet/web"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
