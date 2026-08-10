@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AuthExperience } from "./auth/AuthExperience";
+import { useThemePreference, type ThemePreference } from "./theme";
 
 type PageKey = "Overview" | "Time entries" | "Projects" | "Reports" | "Clients" | "Settings";
 type ViewMode = "grid" | "list";
@@ -171,8 +172,20 @@ function TimesheetPage() {
   </>;
 }
 
+function SettingsPage() {
+  const { preference, changePreference } = useThemePreference();
+  const options: Array<{ value: ThemePreference; label: string; detail: string }> = [
+    { value: "light", label: "Light", detail: "Use the light workspace appearance." },
+    { value: "dark", label: "Dark", detail: "Use the darker workspace appearance." },
+    { value: "system", label: "System", detail: "Follow your device or browser preference." },
+  ];
+
+  return <><header className="content-header"><div><p className="breadcrumb">Workspace <Icon name="chevron" size={13} /></p><h1>Settings</h1><p className="page-subtitle">Choose how TempoLedger should look while you work.</p></div></header><section className="panel settings-card" aria-labelledby="appearance-title"><div className="settings-card__heading"><p className="section-kicker">APPEARANCE</p><h2 id="appearance-title">Theme</h2><p>Light, dark, or follow your system setting. Your choice is saved on this device.</p></div><fieldset className="theme-options"><legend className="visually-hidden">Theme preference</legend>{options.map((option) => <label className={`theme-option ${preference === option.value ? "theme-option--selected" : ""}`} key={option.value}><input type="radio" name="theme-preference" value={option.value} checked={preference === option.value} onChange={() => changePreference(option.value)} /><span><strong>{option.label}</strong><small>{option.detail}</small></span></label>)}</fieldset></section></>;
+}
+
 function PlaceholderPage({ page }: { page: Exclude<PageKey, "Overview"> }) {
   if (page === "Time entries") return <TimesheetPage />;
+  if (page === "Settings") return <SettingsPage />;
   const copy = pageCopy[page];
   return <><header className="content-header"><div><p className="breadcrumb">Workspace <Icon name="chevron" size={13} /></p><h1>{copy.title}</h1><p className="page-subtitle">{copy.detail}</p></div><button className="bare-button" type="button"><Icon name="more" size={21} /></button></header><div className="panel placeholder-card"><div className="placeholder-icon"><Icon name={page === "Projects" ? "folder" : page === "Reports" ? "chart" : page === "Settings" ? "settings" : "grid"} size={22} /></div><h2>{copy.title} is ready for your next pass</h2><p>This workspace keeps the same focused, low-noise foundation across every view.</p></div></>;
 }
@@ -189,6 +202,7 @@ function Dashboard() {
 
 export default function App() {
   const [path, setPath] = useState(window.location.pathname);
+  useThemePreference();
 
   useEffect(() => {
     const handlePopState = () => setPath(window.location.pathname);

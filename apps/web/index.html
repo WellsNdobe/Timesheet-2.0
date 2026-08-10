@@ -3,7 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#151d1b" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" />
+    <script>
+      (() => {
+        const key = "tempoledger.theme-preference";
+        let preference = "system";
+        try {
+          const stored = window.localStorage.getItem(key);
+          if (stored === "light" || stored === "dark" || stored === "system") preference = stored;
+        } catch {
+          // Use the system preference when browser storage is unavailable.
+        }
+        if (preference === "light" || preference === "dark") document.documentElement.dataset.theme = preference;
+        const themeColor = document.querySelector('meta[name="theme-color"]');
+        if (themeColor) themeColor.setAttribute("content", preference === "dark" || (preference === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "#111315" : "#ffffff");
+      })();
+    </script>
     <title>TempoLedger</title>
   </head>
   <body>
