@@ -29,7 +29,7 @@ export const workspaces = pgTable(
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     name: text("name").notNull(),
-    timezone: text("timezone").notNull().default("Africa/Johannesburg"),
+    timezone: text("timezone").notNull(),
     createdByUserId: bigint("created_by_user_id", { mode: "number" }).notNull().references(() => users.id, { onDelete: "cascade" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

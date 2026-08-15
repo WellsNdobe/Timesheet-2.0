@@ -30,9 +30,9 @@ const cookieFrom = (response: SupertestResponse) => {
   return value.split(";", 1)[0];
 };
 
-const register = (email = "maia@example.com", password = "correct-horse-battery") => request(app)
+const register = (email = "maia@example.com", password = "correct-horse-battery", workspace = { organizationName: "Tempo Studio", timezone: "Africa/Johannesburg" }) => request(app)
   .post("/api/auth/register")
-  .send({ email, password });
+  .send({ email, password, ...workspace });
 
 const createRoleFixture = async () => {
   const adminRegistration = await register("admin@example.com");
@@ -136,6 +136,48 @@ describe.sequential("email authentication", () => {
     const [storedUser] = await db.select().from(schema.users);
     expect(storedUser.passwordHash).toMatch(/^\$argon2id\$/);
     expect(storedUser.passwordHash).not.toContain("correct-horse-battery");
+
+    const [storedWorkspace] = await db.select().from(schema.workspaces);
+    expect(storedWorkspace).toMatchObject({ name: "Tempo Studio", timezone: "Africa/Johannesburg" });
+  });
+
+  it("requires a named workspace and valid IANA timezone for direct registration", async () => {
+    const missingWorkspace = await request(app).post("/api/auth/register").send({ email: "missing@example.com", password: "correct-horse-battery" });
+    const invalidTimezone = await request(app).post("/api/auth/register").send({ email: "invalid@example.com", password: "correct-horse-battery", organizationName: "Invalid Co", timezone: "South Africa" });
+    const valid = await register("london@example.com", "correct-horse-battery", { organizationName: "  London Studio  ", timezone: "Europe/London" });
+
+    expect(missingWorkspace.status).toBe(400);
+    expect(invalidTimezone.status).toBe(400);
+    expect(valid.status).toBe(201);
+    expect(await db.select().from(schema.users)).toHaveLength(1);
+    expect(await db.select().from(schema.workspaces)).toEqual([expect.objectContaining({ name: "London Studio", timezone: "Europe/London" })]);
+  });
+
+  it("joins an invited workspace without creating a personal workspace", async () => {
+    const adminRegistration = await register("owner@example.com");
+    const [ownerMembership] = await db.select().from(schema.workspaceMemberships);
+    const invitation = await request(app)
+      .post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`)
+      .set(auth(adminRegistration.body.accessToken as string))
+      .send({ email: "invitee@example.com", role: "member" });
+
+    const joined = await request(app).post("/api/auth/register").send({
+      email: "invitee@example.com",
+      password: "correct-horse-battery",
+      inviteToken: invitation.body.invitation.token,
+    });
+
+    expect(joined.status).toBe(201);
+    expect(await db.select().from(schema.workspaces)).toHaveLength(1);
+    const memberships = await db.select().from(schema.workspaceMemberships);
+    expect(memberships).toHaveLength(2);
+    expect(memberships.every((membership) => membership.workspaceId === ownerMembership.workspaceId)).toBe(true);
+  });
+
+  it("rolls back user creation when an invitation cannot be accepted", async () => {
+    const failed = await request(app).post("/api/auth/register").send({ email: "invitee@example.com", password: "correct-horse-battery", inviteToken: "invalid-invitation-token-value" });
+    expect(failed.status).toBeGreaterThanOrEqual(400);
+    expect(await db.select().from(schema.users)).toHaveLength(0);
   });
 
   it("rejects malformed registrations and case-insensitive duplicate emails", async () => {
