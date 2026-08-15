@@ -19,7 +19,7 @@
   "send_email": [
     {
       "name": "EMAIL",
-      "allowed_sender_addresses": ["invites@buildly.co.za"]
+      "allowed_sender_addresses": ["invites@tempoledger.buildly.co.za"]
     }
   ],
   "rules": [
@@ -34,9 +34,9 @@
     "API_PORT": "3000",
     "WEB_ORIGIN": "https://tempoledger-timesheet.danielndobe850.workers.dev",
     "EMAIL_PROVIDER": "cloudflare",
-    "EMAIL_FROM_ADDRESS": "invites@buildly.co.za",
+    "EMAIL_FROM_ADDRESS": "invites@tempoledger.buildly.co.za",
     "EMAIL_FROM_NAME": "TempoLedger",
-    "EMAIL_REPLY_TO": "invites@buildly.co.za"
+    "EMAIL_REPLY_TO": "invites@tempoledger.buildly.co.za"
   },
   "observability": {
     "enabled": true,

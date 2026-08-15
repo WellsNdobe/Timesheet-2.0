@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Icon } from "../components/Icon";
 
 const overviewBreakdown = [
-  { name: "Northstar redesign", client: "Northstar Labs", hours: "18h 20m", value: "R 9,200", share: 74, color: "blue" },
+  { name: "Northstar", client: "Northstar Labs", hours: "18h 20m", value: "R 9,200", share: 74, color: "blue" },
   { name: "Cedar & Co. website", client: "Cedar & Co.", hours: "12h 45m", value: "R 5,100", share: 52, color: "green" },
   { name: "Atlas product audit", client: "Atlas Ventures", hours: "8h 10m", value: "R 3,280", share: 34, color: "purple" },
   { name: "Juniper campaign", client: "Juniper House", hours: "5h 25m", value: "R 2,170", share: 23, color: "orange" },
