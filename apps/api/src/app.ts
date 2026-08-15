@@ -6,6 +6,7 @@ import { env } from "./config.js";
 import { errorHandler, notFoundHandler } from "./errors.js";
 import { timesheetRouter } from "./timesheets/routes.js";
 import { workspaceRouter } from "./workspaces/routes.js";
+import { workflowRouter } from "./workflow/routes.js";
 
 export const app = express();
 
@@ -25,5 +26,6 @@ app.get("/api/hello", (_request, response) => {
 app.use("/api/auth", authRouter);
 app.use("/api/workspaces", workspaceRouter);
 app.use("/api", timesheetRouter);
+app.use("/api", workflowRouter);
 app.use(notFoundHandler);
 app.use(errorHandler);

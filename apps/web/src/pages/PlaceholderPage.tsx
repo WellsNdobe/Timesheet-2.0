@@ -4,7 +4,8 @@ import type { IconName, PageKey } from "../types/navigation";
 const pageCopy: Record<Exclude<PageKey, "Overview" | "Time entries" | "Settings">, { eyebrow: string; title: string; detail: string; icon: IconName }> = {
   Projects: { eyebrow: "WORKSPACE", title: "Projects", detail: "Keep budgets, clients, and project progress in one place.", icon: "folder" },
   Reports: { eyebrow: "INSIGHTS", title: "Reports", detail: "A clear view of time, capacity, and value will appear here.", icon: "chart" },
-  Clients: { eyebrow: "MANAGE", title: "Clients", detail: "Client relationships and project activity will appear here.", icon: "users" },
+  Approvals: { eyebrow: "REVIEW", title: "Approvals", detail: "Submitted time awaiting review will appear here.", icon: "check" },
+  Members: { eyebrow: "MANAGE", title: "Members", detail: "Workspace roles and access will appear here.", icon: "users" },
 };
 
 export function PlaceholderPage({ page }: { page: Exclude<PageKey, "Overview" | "Time entries" | "Settings"> }) {

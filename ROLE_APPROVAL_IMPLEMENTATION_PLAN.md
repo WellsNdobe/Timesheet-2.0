@@ -1,3 +1,4 @@
+
 # Role and Approval Workflow Implementation Plan
 
 ## Purpose
@@ -587,5 +588,7 @@ Ensure actors do not need to poll the application to discover required work.
 | Member comments versus internal reasons | Phases 4, 7, and 8 |
 
 ## Recommended implementation order
+
+Implementation note (2026-08-12): Phases 4–10 are implemented in source. Automated validation and owner manual acceptance remain pending.
 
 Proceed strictly from Phase 0 through Phase 10. Do not begin the Approvals UI before Phases 1–4 are accepted: those phases define the security, routing, revision, and audit contracts the interface depends on.

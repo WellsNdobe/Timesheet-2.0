@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, date, index, integer, pgEnum, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, date, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const workspaceRoleEnum = pgEnum("workspace_role", ["admin", "manager", "member"]);
 export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "accepted", "revoked"]);
@@ -243,6 +243,41 @@ export const timesheetReviewEntrySnapshots = pgTable(
   (table) => [
     check("timesheet_review_entry_snapshots_duration_positive", sql`${table.durationMinutes} > 0`),
     index("timesheet_review_entry_snapshots_revision_index").on(table.revisionId, table.workDate),
+  ],
+);
+
+export const workspaceAuditEvents = pgTable(
+  "workspace_audit_events",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    actorMembershipId: bigint("actor_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
+    type: text("type").notNull(),
+    targetMembershipId: bigint("target_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
+    targetProjectId: bigint("target_project_id", { mode: "number" }).references(() => projects.id),
+    details: jsonb("details").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("workspace_audit_events_workspace_created_index").on(table.workspaceId, table.createdAt)],
+);
+
+export const workflowNotifications = pgTable(
+  "workflow_notifications",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    recipientMembershipId: bigint("recipient_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id, { onDelete: "cascade" }),
+    type: text("type").notNull(),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    href: text("href").notNull(),
+    sourceKey: text("source_key").notNull(),
+    readAt: timestamp("read_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("workflow_notifications_recipient_source_unique").on(table.recipientMembershipId, table.sourceKey),
+    index("workflow_notifications_recipient_created_index").on(table.recipientMembershipId, table.createdAt),
   ],
 );
 

@@ -100,6 +100,8 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.delete(schema.workflowNotifications);
+  await db.delete(schema.workspaceAuditEvents);
   await db.delete(schema.timesheetReviewEntrySnapshots);
   await db.delete(schema.timesheetReviewEvents);
   await db.delete(schema.timesheetApprovalRevisions);
@@ -374,5 +376,185 @@ describe.sequential("role authorization", () => {
     expect(deactivateLastAdmin.status).toBe(409);
     expect(deactivateLastAdmin.body.error.code).toBe("last_admin");
     expect(inactiveProjects.status).toBe(404);
+  });
+});
+
+describe.sequential("remaining approval workflow", () => {
+  it("applies workspace approval filters after enforcing Manager assignment scope", async () => {
+    const fixture = await createRoleFixture();
+    const [sheet] = await db.insert(schema.weeklyTimesheets).values({
+      workspaceId: fixture.workspaceId,
+      membershipId: fixture.member.membership.id,
+      weekStart: "2026-08-03",
+      status: "partially_approved",
+      submittedAt: new Date("2026-08-05T08:00:00.000Z"),
+    }).returning();
+    const [assignedItem] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.assignedProject.id }).returning();
+    const [adminItem] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.adminProject.id }).returning();
+    await db.insert(schema.timesheetApprovalRevisions).values([
+      { approvalItemId: assignedItem.id, revisionNumber: 1, approverMembershipId: fixture.manager.membership.id, assignedApproverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 120, status: "pending", submittedAt: new Date("2026-08-05T08:00:00.000Z") },
+      { approvalItemId: adminItem.id, revisionNumber: 1, approverMembershipId: fixture.admin.membership.id, assignedApproverMembershipId: fixture.admin.membership.id, projectName: fixture.adminProject.name, submittedMinutes: 60, status: "approved", submittedAt: new Date("2026-08-04T08:00:00.000Z"), resolvedAt: new Date("2026-08-04T10:00:00.000Z"), resolvedByMembershipId: fixture.admin.membership.id },
+    ]);
+
+    const managerHistory = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals?status=approved`).set(auth(fixture.manager.token));
+    const adminHistory = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals?status=approved&projectId=${fixture.adminProject.id}&submitterMembershipId=${fixture.member.membership.id}&approverMembershipId=${fixture.admin.membership.id}&submittedFrom=2026-08-04&submittedTo=2026-08-04`).set(auth(fixture.admin.token));
+    const wrongProject = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals?projectId=${fixture.assignedProject.id}&status=approved`).set(auth(fixture.admin.token));
+    const pendingCount = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approvals/pending-count`).set(auth(fixture.admin.token));
+
+    expect(managerHistory.status).toBe(200);
+    expect(managerHistory.body.approvals).toEqual([]);
+    expect(adminHistory.status).toBe(200);
+    expect(adminHistory.body.approvals).toEqual([expect.objectContaining({ id: String(adminItem.id), status: "approved" })]);
+    expect(wrongProject.body.approvals).toEqual([]);
+    expect(pendingCount.body.count).toBe(1);
+  });
+
+  it("returns immutable revision diffs and never exposes internal Admin reasons to Managers", async () => {
+    const fixture = await createRoleFixture();
+    const [sheet] = await db.insert(schema.weeklyTimesheets).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, weekStart: "2026-08-03", status: "in_review", submittedAt: new Date() }).returning();
+    const [item] = await db.insert(schema.timesheetApprovalItems).values({ weeklyTimesheetId: sheet.id, projectId: fixture.assignedProject.id }).returning();
+    const [first, second] = await db.insert(schema.timesheetApprovalRevisions).values([
+      { approvalItemId: item.id, revisionNumber: 1, approverMembershipId: fixture.manager.membership.id, assignedApproverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 90, status: "changes_requested", resolvedAt: new Date(), resolvedByMembershipId: fixture.manager.membership.id, returnComment: "Correct the split" },
+      { approvalItemId: item.id, revisionNumber: 2, approverMembershipId: fixture.manager.membership.id, assignedApproverMembershipId: fixture.manager.membership.id, projectName: fixture.assignedProject.name, submittedMinutes: 105, status: "pending" },
+    ]).returning();
+    await db.insert(schema.timesheetReviewEntrySnapshots).values([
+      { revisionId: first.id, sourceEntryId: 1001, workDate: "2026-08-03", durationMinutes: 60, description: "Changed", isBillable: true },
+      { revisionId: first.id, sourceEntryId: 1002, workDate: "2026-08-04", durationMinutes: 30, description: "Removed", isBillable: false },
+      { revisionId: second.id, sourceEntryId: 1001, workDate: "2026-08-03", durationMinutes: 75, description: "Changed", isBillable: true },
+      { revisionId: second.id, sourceEntryId: 1003, workDate: "2026-08-05", durationMinutes: 30, description: "Added", isBillable: true },
+    ]);
+    await db.insert(schema.timesheetReviewEvents).values({ revisionId: second.id, actorMembershipId: fixture.admin.membership.id, type: "transferred", internalReason: "Coverage change", previousApproverMembershipId: fixture.admin.membership.id, nextApproverMembershipId: fixture.manager.membership.id });
+
+    const managerDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${item.id}`).set(auth(fixture.manager.token));
+    const adminDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${item.id}`).set(auth(fixture.admin.token));
+    const memberDetail = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${item.id}`).set(auth(fixture.member.token));
+    const currentForManager = managerDetail.body.approval.revisions[0];
+    const currentForAdmin = adminDetail.body.approval.revisions[0];
+    const currentForMember = memberDetail.body.approval.revisions[0];
+
+    expect(currentForManager.diff.added).toEqual([expect.objectContaining({ sourceEntryId: "1003" })]);
+    expect(currentForManager.diff.removed).toEqual([expect.objectContaining({ sourceEntryId: "1002" })]);
+    expect(currentForManager.diff.changed).toEqual([expect.objectContaining({ before: expect.objectContaining({ durationMinutes: 60 }), after: expect.objectContaining({ durationMinutes: 75 }) })]);
+    expect(currentForManager.events[0]).not.toHaveProperty("internalReason");
+    expect(currentForAdmin.events[0].internalReason).toBe("Coverage change");
+    expect(memberDetail.status).toBe(200);
+    expect(currentForMember.events[0]).not.toHaveProperty("internalReason");
+  });
+
+  it("validates reviewer actions and rejects stale, repeated, and unauthorized decisions", async () => {
+    const fixture = await createRoleFixture();
+    await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-03", durationMinutes: 60 });
+    const submitted = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    const approval = submitted.body.revisions[0];
+
+    const blankComment = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/request-changes`).set(auth(fixture.manager.token)).send({ comment: "   " });
+    const memberDecision = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/approve`).set(auth(fixture.member.token)).send({});
+    const blankOverride = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/approve-as-admin`).set(auth(fixture.admin.token)).send({ reason: "" });
+    const approved = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/approve`).set(auth(fixture.manager.token)).send({});
+    const repeated = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/approve`).set(auth(fixture.manager.token)).send({});
+    const transferResolved = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/transfer`).set(auth(fixture.admin.token)).send({ approverMembershipId: fixture.admin.membership.id, reason: "Too late" });
+
+    expect(blankComment.status).toBe(400);
+    expect(memberDecision.status).toBe(403);
+    expect(blankOverride.status).toBe(400);
+    expect(approved.status).toBe(200);
+    expect(repeated.status).toBe(409);
+    expect(transferResolved.status).toBe(409);
+  });
+
+  it("delivers idempotent, recipient-scoped notifications and isolates read state", async () => {
+    const fixture = await createRoleFixture();
+    const [entry] = await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-03", durationMinutes: 60 }).returning();
+    const submitted = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    const approval = submitted.body.revisions[0];
+
+    const managerInbox = await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.manager.token));
+    const memberBeforeDecision = await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.member.token));
+    expect(managerInbox.body.notifications).toEqual([expect.objectContaining({ type: "submission", href: `/approvals/${approval.approvalItemId}`, readAt: null })]);
+    expect(managerInbox.body.unreadCount).toBe(1);
+    expect(memberBeforeDecision.body.notifications).toEqual([]);
+
+    await db.insert(schema.workflowNotifications).values({ workspaceId: fixture.workspaceId, recipientMembershipId: fixture.manager.membership.id, type: "submission", title: "Duplicate", body: "Duplicate", href: "/approvals", sourceKey: `revision:${approval.revisionId}:submitted` }).onConflictDoNothing();
+    expect((await db.select().from(schema.workflowNotifications).where(eq(schema.workflowNotifications.recipientMembershipId, fixture.manager.membership.id))).length).toBe(1);
+
+    const foreignRead = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/notifications/${managerInbox.body.notifications[0].id}/read`).set(auth(fixture.member.token));
+    expect(foreignRead.status).toBe(204);
+    expect((await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.manager.token))).body.unreadCount).toBe(1);
+    await request(app).patch(`/api/workspaces/${fixture.workspaceId}/notifications/read-all`).set(auth(fixture.manager.token));
+    expect((await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.manager.token))).body.unreadCount).toBe(0);
+
+    await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${approval.revisionId}/request-changes`).set(auth(fixture.manager.token)).send({ comment: "Please clarify" });
+    const memberAfterDecision = await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.member.token));
+    expect(memberAfterDecision.body.notifications).toEqual([expect.objectContaining({ type: "changes_requested", href: "/time-entries?week=2026-08-03" })]);
+    expect(memberAfterDecision.body.notifications[0]).not.toHaveProperty("internalReason");
+
+    await request(app).patch(`/api/workspaces/${fixture.workspaceId}/time-entries/${entry.id}`).set(auth(fixture.member.token)).send({ durationMinutes: 75 });
+    const resubmitted = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    const nextRevision = resubmitted.body.revisions[0];
+    const managerAfterResubmit = await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.manager.token));
+    expect(managerAfterResubmit.body.notifications).toEqual(expect.arrayContaining([expect.objectContaining({ type: "resubmission", href: `/approvals/${approval.approvalItemId}` })]));
+
+    await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${nextRevision.revisionId}/transfer`).set(auth(fixture.admin.token)).send({ approverMembershipId: fixture.admin.membership.id, reason: "Covering leave" });
+    const adminAfterTransfer = await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.admin.token));
+    const formerApproverLink = await request(app).get(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}`).set(auth(fixture.manager.token));
+    expect(adminAfterTransfer.body.notifications).toEqual([expect.objectContaining({ type: "transfer", href: `/approvals/${approval.approvalItemId}` })]);
+    expect(formerApproverLink.status).toBe(404);
+
+    await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${nextRevision.revisionId}/transfer`).set(auth(fixture.admin.token)).send({ approverMembershipId: fixture.manager.membership.id, reason: "Original reviewer returned" });
+    await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${approval.approvalItemId}/revisions/${nextRevision.revisionId}/approve-as-admin`).set(auth(fixture.admin.token)).send({ reason: "Payroll cutoff" });
+    const memberAfterOverride = await request(app).get(`/api/workspaces/${fixture.workspaceId}/notifications`).set(auth(fixture.member.token));
+    expect(memberAfterOverride.body.notifications).toEqual(expect.arrayContaining([expect.objectContaining({ type: "approved", href: "/time-entries?week=2026-08-03" })]));
+  });
+
+  it("does not create work or notifications for an inactive configured approver", async () => {
+    const fixture = await createRoleFixture();
+    await db.update(schema.workspaceMemberships).set({ isActive: false }).where(eq(schema.workspaceMemberships.id, fixture.manager.membership.id));
+    await db.insert(schema.timeEntries).values({ workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-03", durationMinutes: 60 });
+
+    const submitted = await request(app).post(`/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`).set(auth(fixture.member.token)).send({});
+    const notifications = await db.select().from(schema.workflowNotifications).where(eq(schema.workflowNotifications.recipientMembershipId, fixture.manager.membership.id));
+
+    expect(submitted.status).toBe(409);
+    expect(submitted.body.error.code).toBe("submission_not_ready");
+    expect(notifications).toEqual([]);
+  });
+
+  it("audits Admin membership governance and keeps member mutations Admin-only", async () => {
+    const fixture = await createRoleFixture();
+    const managerMutation = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/members/${fixture.member.membership.id}`).set(auth(fixture.manager.token)).send({ role: "manager" });
+    const promoted = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/members/${fixture.member.membership.id}`).set(auth(fixture.admin.token)).send({ role: "manager" });
+    const deactivated = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/members/${fixture.member.membership.id}`).set(auth(fixture.admin.token)).send({ isActive: false });
+    const reactivated = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/members/${fixture.member.membership.id}`).set(auth(fixture.admin.token)).send({ isActive: true });
+    const auditResponse = await request(app).get(`/api/workspaces/${fixture.workspaceId}/audit-events`).set(auth(fixture.admin.token));
+    const managerAudit = await request(app).get(`/api/workspaces/${fixture.workspaceId}/audit-events`).set(auth(fixture.manager.token));
+
+    expect(managerMutation.status).toBe(403);
+    expect(promoted.body.membership).toMatchObject({ role: "manager", isActive: true });
+    expect(deactivated.body.membership.isActive).toBe(false);
+    expect(reactivated.body.membership.isActive).toBe(true);
+    expect(auditResponse.body.events.map((event: { type: string }) => event.type)).toEqual(expect.arrayContaining(["member_role_changed", "member_deactivated", "member_reactivated"]));
+    expect(managerAudit.status).toBe(403);
+  });
+
+  it("creates bounded-role invitations, revokes duplicate pending invites, and audits the action", async () => {
+    const fixture = await createRoleFixture();
+    const invalidRole = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "invitee@example.com", role: "admin" });
+    const activeMember = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "MEMBER@example.com", role: "member" });
+    const first = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: " Invitee@Example.com ", role: "member" });
+    const replacement = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "invitee@example.com", role: "manager" });
+    const listed = await request(app).get(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token));
+    const events = await request(app).get(`/api/workspaces/${fixture.workspaceId}/audit-events`).set(auth(fixture.admin.token));
+
+    expect(invalidRole.status).toBe(400);
+    expect(activeMember.status).toBe(409);
+    expect(first.status).toBe(201);
+    expect(first.body.invitation).toMatchObject({ email: "invitee@example.com", role: "member", status: "pending" });
+    expect(replacement.status).toBe(201);
+    expect(replacement.body.invitation).toMatchObject({ email: "invitee@example.com", role: "manager", status: "pending" });
+    expect(listed.body.invitations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.body.invitation.id, status: "revoked" }),
+      expect.objectContaining({ id: replacement.body.invitation.id, status: "pending" }),
+    ]));
+    expect(events.body.events.filter((event: { type: string }) => event.type === "member_invited")).toHaveLength(2);
   });
 });
