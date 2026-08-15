@@ -25,9 +25,25 @@ const credentialsSchema = z.object({
   password: z.string().min(8).max(128),
 }).strict();
 
-const registrationSchema = credentialsSchema.extend({
-  inviteToken: z.string().min(20).max(512).optional(),
+const timezoneSchema = z.string().trim().min(1).max(100).refine((timezone) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: timezone }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}, "A valid IANA timezone is required.");
+
+const directRegistrationSchema = credentialsSchema.extend({
+  organizationName: z.string().trim().min(1).max(120),
+  timezone: timezoneSchema,
 }).strict();
+
+const invitationRegistrationSchema = credentialsSchema.extend({
+  inviteToken: z.string().trim().min(20).max(512),
+}).strict();
+
+const registrationSchema = z.union([directRegistrationSchema, invitationRegistrationSchema]);
 
 const refreshCookieOptions: CookieOptions = {
   httpOnly: true,
@@ -91,7 +107,7 @@ authRouter.use(limiter);
 authRouter.post("/register", asyncHandler(async (request, response) => {
   const parsedRegistration = registrationSchema.safeParse(request.body);
   if (!parsedRegistration.success) {
-    throw new ApiError(400, "validation_error", "A valid email and a password of 8 to 128 characters are required.");
+    throw new ApiError(400, "validation_error", "Valid account and workspace details are required.");
   }
   const credentials = parsedRegistration.data;
   const passwordHash = await hashPassword(credentials.password);
@@ -103,15 +119,15 @@ authRouter.post("/register", asyncHandler(async (request, response) => {
         .values({ email: credentials.email, passwordHash })
         .returning({ id: users.id, email: users.email, createdAt: users.createdAt });
 
-      const [workspace] = await transaction.insert(workspaces).values({
-        name: `${user.email.split("@")[0]}\'s workspace`,
-        timezone: "Africa/Johannesburg",
-        createdByUserId: user.id,
-      }).returning({ id: workspaces.id });
-      await transaction.insert(workspaceMemberships).values({ workspaceId: workspace.id, userId: user.id, role: "admin" });
-
-      if (credentials.inviteToken) {
+      if ("inviteToken" in credentials) {
         await acceptInvitationForUser(transaction, { id: user.id, email: user.email }, credentials.inviteToken);
+      } else {
+        const [workspace] = await transaction.insert(workspaces).values({
+          name: credentials.organizationName,
+          timezone: credentials.timezone,
+          createdByUserId: user.id,
+        }).returning({ id: workspaces.id });
+        await transaction.insert(workspaceMemberships).values({ workspaceId: workspace.id, userId: user.id, role: "admin" });
       }
 
       const refreshToken = createRefreshToken();
