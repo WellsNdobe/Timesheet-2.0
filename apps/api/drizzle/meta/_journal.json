@@ -50,6 +50,20 @@
       "when": 1786780800000,
       "tag": "0006_natural_workspace_onboarding",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786788600000,
+      "tag": "0007_supabase_api_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786791600000,
+      "tag": "0008_tempoledger_api_role",
+      "breakpoints": true
     }
   ]
 }

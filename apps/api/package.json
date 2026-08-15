@@ -12,13 +12,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "argon2": "^0.45.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
-    "express": "^4.21.1",
-    "express-rate-limit": "^8.6.2",
+    "express": "^5.2.1",
     "jose": "^6.2.8",
     "pg": "^8.23.0",
     "zod": "^4.4.3"

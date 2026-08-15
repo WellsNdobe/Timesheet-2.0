@@ -1,13 +1,12 @@
 import { and, eq, gt, isNull } from "drizzle-orm";
-import { Router, type CookieOptions } from "express";
-import { rateLimit } from "express-rate-limit";
+import { Router, type CookieOptions, type RequestHandler } from "express";
 import { z } from "zod";
 import { env } from "../config.js";
 import { db } from "../db/client.js";
 import { authSessions, users, workspaceMemberships, workspaces } from "../db/schema.js";
 import { ApiError, asyncHandler } from "../errors.js";
 import { authenticate } from "./middleware.js";
-import { dummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
+import { getDummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
 import {
   createAccessToken,
   createRefreshToken,
@@ -87,18 +86,34 @@ const isUniqueViolation = (error: unknown) => {
   return false;
 };
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1_000,
-  limit: 20,
-  standardHeaders: "draft-8",
-  legacyHeaders: false,
-  skip: () => env.nodeEnv === "test",
-  handler: (_request, response) => {
+const authLimit = 20;
+const authWindowMs = 15 * 60 * 1_000;
+const authAttempts = new Map<string, { count: number; resetAt: number }>();
+
+const limiter: RequestHandler = (request, response, next) => {
+  if (env.nodeEnv === "test") return next();
+
+  const now = Date.now();
+  const key = request.get("cf-connecting-ip") ?? request.ip ?? "unknown";
+  const previous = authAttempts.get(key);
+  const attempt = !previous || previous.resetAt <= now
+    ? { count: 1, resetAt: now + authWindowMs }
+    : { count: previous.count + 1, resetAt: previous.resetAt };
+  authAttempts.set(key, attempt);
+
+  response.setHeader("RateLimit-Limit", authLimit);
+  response.setHeader("RateLimit-Remaining", Math.max(0, authLimit - attempt.count));
+  response.setHeader("RateLimit-Reset", Math.ceil((attempt.resetAt - now) / 1_000));
+
+  if (attempt.count > authLimit) {
     response.status(429).json({
       error: { code: "rate_limited", message: "Too many authentication attempts. Please try again later." },
     });
-  },
-});
+    return;
+  }
+
+  next();
+};
 
 export const authRouter = Router();
 
@@ -157,7 +172,7 @@ authRouter.post("/register", asyncHandler(async (request, response) => {
 authRouter.post("/login", asyncHandler(async (request, response) => {
   const credentials = parseCredentials(request.body);
   const [user] = await db.select().from(users).where(eq(users.email, credentials.email)).limit(1);
-  const passwordMatches = await verifyPassword(user?.passwordHash ?? await dummyPasswordHash, credentials.password);
+  const passwordMatches = await verifyPassword(user?.passwordHash ?? await getDummyPasswordHash(), credentials.password);
 
   if (!user || !user.isActive || !passwordMatches) {
     throw new ApiError(401, "invalid_credentials", "The email or password is incorrect.");

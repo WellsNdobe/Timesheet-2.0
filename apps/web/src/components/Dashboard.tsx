@@ -27,16 +27,18 @@ export function Dashboard({ accessToken, userEmail, path, onNavigate }: { access
   if (state.status === "loading") return <AccessStatePage title="Loading your workspace" message="Checking your membership and permissions..." />;
   if (state.status === "empty") return <AccessStatePage title="No active workspace" message="Ask an Admin to invite or reactivate you in a workspace." />;
   if (state.status === "error") return <AccessStatePage title="Workspace unavailable" message="We could not load your workspace. Please try again." onRetry={() => void load()} />;
-  const pathname = path.split("?")[0]; const approvalMatch = pathname.match(/^\/approvals\/([^/]+)$/); const unknownPath = routes[pathname] === undefined && !approvalMatch; const activePage = approvalMatch ? "Approvals" : routes[pathname] ?? "Overview"; const role = state.workspace.membership.role;
+  if (state.status !== "ready") return null;
+  const readyState = state;
+  const pathname = path.split("?")[0]; const approvalMatch = pathname.match(/^\/approvals\/([^/]+)$/); const unknownPath = routes[pathname] === undefined && !approvalMatch; const activePage = approvalMatch ? "Approvals" : routes[pathname] ?? "Overview"; const role = readyState.workspace.membership.role;
   const forbidden = (activePage === "Approvals" && role === "member") || (["Members", "Settings"] as PageKey[]).includes(activePage) && role !== "admin";
-  return <DashboardLayout activePage={activePage} onSelectPage={(page) => onNavigate(paths[page])} onNavigate={onNavigate} accessToken={accessToken} workspace={state.workspace} pendingApprovalCount={state.pendingCount} userEmail={userEmail}>{(onLogTime) => {
+  return <DashboardLayout activePage={activePage} onSelectPage={(page) => onNavigate(paths[page])} onNavigate={onNavigate} accessToken={accessToken} workspace={readyState.workspace} pendingApprovalCount={readyState.pendingCount} userEmail={userEmail}>{(onLogTime) => {
     if (unknownPath) return <AccessStatePage title="Page not found" message="The requested page does not exist in this workspace." />;
     if (forbidden) return <AccessStatePage title="Access denied" message="Your workspace role does not allow access to this page." />;
     if (activePage === "Overview") return <OverviewPage onLogTime={onLogTime} />;
-    if (activePage === "Time entries") return <TimesheetPage workspace={state.workspace} accessToken={accessToken} />;
-    if (activePage === "Approvals") return <ApprovalsPage workspace={state.workspace} accessToken={accessToken} approvalId={approvalMatch?.[1]} onNavigate={onNavigate} onPendingCountChange={updatePendingCount} />;
-    if (activePage === "Members") return <MembersPage workspace={state.workspace} accessToken={accessToken} onNavigate={onNavigate} />;
-    if (activePage === "Projects") return <ProjectsPage workspace={state.workspace} accessToken={accessToken} />;
+    if (activePage === "Time entries") return <TimesheetPage workspace={readyState.workspace} accessToken={accessToken} />;
+    if (activePage === "Approvals") return <ApprovalsPage workspace={readyState.workspace} accessToken={accessToken} approvalId={approvalMatch?.[1]} onNavigate={onNavigate} onPendingCountChange={updatePendingCount} />;
+    if (activePage === "Members") return <MembersPage workspace={readyState.workspace} accessToken={accessToken} onNavigate={onNavigate} />;
+    if (activePage === "Projects") return <ProjectsPage workspace={readyState.workspace} accessToken={accessToken} />;
     if (activePage === "Settings") return <SettingsPage />;
     return <PlaceholderPage page={activePage} />;
   }}</DashboardLayout>;

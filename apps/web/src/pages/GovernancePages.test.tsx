@@ -24,7 +24,7 @@ describe("member governance", () => {
       http.patch("/api/workspaces/1/members/20", () => HttpResponse.json({ error: { code: "pending_approvals", message: "Transfer pending approvals first." } }, { status: 409 })),
     );
     const user = userEvent.setup();
-    render(<MembersPage workspace={adminWorkspace} accessToken="token" />);
+    render(<MembersPage workspace={adminWorkspace} accessToken="token" onNavigate={() => {}} />);
 
     const row = (await screen.findByText("manager@example.com")).closest("tr")!;
     expect(within(row).getByText("2 · transfer first")).toBeInTheDocument();
@@ -38,7 +38,7 @@ describe("member governance", () => {
       http.get("/api/workspaces/1/audit-events", () => HttpResponse.json({ error: { code: "unavailable" } }, { status: 500 })),
     );
     const user = userEvent.setup();
-    const view = render(<MembersPage workspace={adminWorkspace} accessToken="token" />);
+    const view = render(<MembersPage workspace={adminWorkspace} accessToken="token" onNavigate={() => {}} />);
     expect(await screen.findByText("Members unavailable")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
     view.unmount();
@@ -47,7 +47,7 @@ describe("member governance", () => {
       http.get("/api/workspaces/1/members", () => HttpResponse.json({ members: [] })),
       http.get("/api/workspaces/1/audit-events", () => HttpResponse.json({ events: [] })),
     );
-    render(<MembersPage workspace={adminWorkspace} accessToken="token" />);
+    render(<MembersPage workspace={adminWorkspace} accessToken="token" onNavigate={() => {}} />);
     await screen.findByText("No governance changes yet.");
     await user.click(screen.getByRole("button", { name: "Invite member" }));
     const role = screen.getByRole("combobox", { name: "Role" });

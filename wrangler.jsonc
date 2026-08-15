@@ -1,0 +1,45 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tempoledger-timesheet",
+  "main": "apps/api/src/worker.ts",
+  "compatibility_date": "2026-08-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "apps/web/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "79b4931061db4245a2d58e1f62125c8d"
+    }
+  ],
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["invites@buildly.co.za"]
+    }
+  ],
+  "rules": [
+    {
+      "type": "Data",
+      "globs": ["**/*.png"],
+      "fallthrough": true
+    }
+  ],
+  "vars": {
+    "NODE_ENV": "production",
+    "API_PORT": "3000",
+    "WEB_ORIGIN": "https://tempoledger-timesheet.danielndobe850.workers.dev",
+    "EMAIL_PROVIDER": "cloudflare",
+    "EMAIL_FROM_ADDRESS": "invites@buildly.co.za",
+    "EMAIL_FROM_NAME": "TempoLedger",
+    "EMAIL_REPLY_TO": "invites@buildly.co.za"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

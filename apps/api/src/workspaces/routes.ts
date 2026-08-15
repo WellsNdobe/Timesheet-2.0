@@ -4,6 +4,8 @@ import { z } from "zod";
 import { authenticate } from "../auth/middleware.js";
 import { db } from "../db/client.js";
 import { timesheetApprovalRevisions, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
+import { env } from "../config.js";
+import { sendWorkspaceInvitation, type InvitationDeliveryStatus } from "../email/sendWorkspaceInvitation.js";
 import { ApiError, asyncHandler } from "../errors.js";
 import { requireRole, requireWorkspaceMembership, parseWorkspaceId, workspaceRoles, type WorkspaceMembership, type WorkspaceRole } from "./access.js";
 import { createInvitationToken, hashInvitationToken } from "./invitations.js";
@@ -195,15 +197,38 @@ workspaceRouter.post("/:workspaceId/invitations", asyncHandler(async (request, r
   const userId = Number(response.locals.authUser.id);
   const input = parseBody(createInvitationSchema, request.body, "A valid invitation email and role are required.");
   const token = createInvitationToken();
-  const invitation = await db.transaction(async (transaction) => {
+  const invitationContext = await db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId})`);
     const actor = await requireAdminInTransaction(transaction, workspaceId, userId);
+    const [workspace] = await transaction.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1);
+    const [inviter] = await transaction.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+    if (!workspace || !inviter) throw new ApiError(404, "not_found", "The requested resource was not found.");
     const [alreadyMember] = await transaction.select({ id: workspaceMemberships.id }).from(workspaceMemberships).innerJoin(users, eq(workspaceMemberships.userId, users.id)).where(and(eq(workspaceMemberships.workspaceId, workspaceId), eq(users.email, input.email), eq(workspaceMemberships.isActive, true))).limit(1);
     if (alreadyMember) throw new ApiError(409, "already_workspace_member", "This email already belongs to the workspace.");
     await transaction.update(workspaceInvitations).set({ status: "revoked", revokedAt: new Date() }).where(and(eq(workspaceInvitations.workspaceId, workspaceId), eq(workspaceInvitations.email, input.email), eq(workspaceInvitations.status, "pending")));
     const [created] = await transaction.insert(workspaceInvitations).values({ workspaceId, email: input.email, role: input.role, tokenHash: hashInvitationToken(token), expiresAt: new Date(Date.now() + invitationTtlMs), invitedByMembershipId: actor.id }).returning();
     await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: "member_invited", details: { email: input.email, role: input.role, invitationId: String(created.id) } });
-    return created;
+    return { invitation: created, workspaceName: workspace.name, inviterEmail: inviter.email };
   });
-  response.status(201).json({ invitation: { id: String(invitation.id), email: invitation.email, role: invitation.role, status: invitation.status, expiresAt: invitation.expiresAt.toISOString(), token } });
+  const acceptUrl = new URL("/signup", env.webOrigin);
+  acceptUrl.searchParams.set("inviteToken", token);
+  let delivery: { status: InvitationDeliveryStatus };
+  try {
+    delivery = await sendWorkspaceInvitation({
+      recipientEmail: invitationContext.invitation.email,
+      inviterEmail: invitationContext.inviterEmail,
+      workspaceName: invitationContext.workspaceName,
+      role: input.role,
+      acceptUrl: acceptUrl.toString(),
+      expiresAt: invitationContext.invitation.expiresAt,
+    });
+  } catch (error) {
+    console.error("Workspace invitation email delivery failed", { error: error instanceof Error ? error.name : "UnknownError" });
+    delivery = { status: "failed" };
+  }
+  const invitation = invitationContext.invitation;
+  response.status(201).json({
+    delivery,
+    invitation: { id: String(invitation.id), email: invitation.email, role: invitation.role, status: invitation.status, expiresAt: invitation.expiresAt.toISOString(), token, acceptUrl: acceptUrl.toString() },
+  });
 }));

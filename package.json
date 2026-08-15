@@ -18,11 +18,13 @@
     "lint": "npm run lint --workspace=@timesheet/web",
     "lint:fix": "npm run lint:fix --workspace=@timesheet/web",
     "format": "npm run format --workspace=@timesheet/web",
-    "format:check": "npm run format:check --workspace=@timesheet/web"
+    "format:check": "npm run format:check --workspace=@timesheet/web",
+    "deploy:cloudflare": "npm run build --workspace=@timesheet/web && wrangler deploy"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
     "drizzle-kit": "^0.31.10",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.2",
+    "wrangler": "^4.123.0"
   }
 }
