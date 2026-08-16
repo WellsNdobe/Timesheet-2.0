@@ -153,7 +153,7 @@ describe.sequential("email authentication", () => {
     expect(await db.select().from(schema.workspaces)).toEqual([expect.objectContaining({ name: "London Studio", timezone: "Europe/London" })]);
   });
 
-  it("joins an invited workspace without creating a personal workspace", async () => {
+  it("provisions and activates an invited account without creating a personal workspace", async () => {
     const adminRegistration = await register("owner@example.com");
     const [ownerMembership] = await db.select().from(schema.workspaceMemberships);
     const invitation = await request(app)
@@ -161,23 +161,56 @@ describe.sequential("email authentication", () => {
       .set(auth(adminRegistration.body.accessToken as string))
       .send({ email: "invitee@example.com", role: "member" });
 
-    const joined = await request(app).post("/api/auth/register").send({
-      email: "invitee@example.com",
+    const [provisionedUser] = await db.select().from(schema.users).where(eq(schema.users.email, "invitee@example.com"));
+    expect(provisionedUser.requiresPasswordChange).toBe(true);
+    const invitationDetails = await request(app).get(`/api/auth/invitations/${invitation.body.invitation.token}`);
+    expect(invitationDetails.status).toBe(200);
+    expect(invitationDetails.body.invitation).toMatchObject({ email: "invitee@example.com", workspaceName: "Tempo Studio", requiresPasswordChange: true, expiresAt: invitation.body.invitation.expiresAt });
+    const remainingValidity = new Date(invitation.body.invitation.expiresAt).getTime() - Date.now();
+    expect(remainingValidity).toBeGreaterThan(7 * 24 * 60 * 60 * 1_000 - 5_000);
+    expect(remainingValidity).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1_000);
+
+    const joined = await request(app).post("/api/auth/invitations/activate").send({
       password: "correct-horse-battery",
-      inviteToken: invitation.body.invitation.token,
+      token: invitation.body.invitation.token,
     });
 
-    expect(joined.status).toBe(201);
+    expect(joined.status).toBe(200);
+    expect(joined.body.user.email).toBe("invitee@example.com");
     expect(await db.select().from(schema.workspaces)).toHaveLength(1);
     const memberships = await db.select().from(schema.workspaceMemberships);
     expect(memberships).toHaveLength(2);
     expect(memberships.every((membership) => membership.workspaceId === ownerMembership.workspaceId)).toBe(true);
   });
 
-  it("rolls back user creation when an invitation cannot be accepted", async () => {
-    const failed = await request(app).post("/api/auth/register").send({ email: "invitee@example.com", password: "correct-horse-battery", inviteToken: "invalid-invitation-token-value" });
-    expect(failed.status).toBeGreaterThanOrEqual(400);
-    expect(await db.select().from(schema.users)).toHaveLength(0);
+  it("does not activate an account when the invitation token is invalid", async () => {
+    const failed = await request(app).post("/api/auth/invitations/activate").send({ password: "correct-horse-battery", token: "invalid-invitation-token-value" });
+    expect(failed.status).toBe(404);
+    expect(await db.select().from(schema.workspaceMemberships)).toHaveLength(0);
+  });
+
+  it("rejects an invitation only after its stored expiry deadline", async () => {
+    const ownerRegistration = await register("owner@example.com");
+    const [ownerMembership] = await db.select().from(schema.workspaceMemberships);
+    const invitation = await request(app).post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`).set(auth(ownerRegistration.body.accessToken as string)).send({ email: "invitee@example.com", role: "member" });
+    await db.update(schema.workspaceInvitations).set({ expiresAt: new Date(Date.now() - 1_000) }).where(eq(schema.workspaceInvitations.email, "invitee@example.com"));
+
+    expect((await request(app).get(`/api/auth/invitations/${invitation.body.invitation.token}`)).status).toBe(404);
+    expect((await request(app).post("/api/auth/invitations/activate").send({ password: "correct-horse-battery", token: invitation.body.invitation.token })).status).toBe(404);
+  });
+
+  it("lets an existing user log in and accept an invitation in one request", async () => {
+    const ownerRegistration = await register("owner@example.com");
+    const existingRegistration = await register("existing@example.com");
+    const [ownerUser] = await db.select().from(schema.users).where(eq(schema.users.email, "owner@example.com"));
+    const [ownerMembership] = await db.select().from(schema.workspaceMemberships).where(eq(schema.workspaceMemberships.userId, ownerUser.id));
+    const invitation = await request(app).post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`).set(auth(ownerRegistration.body.accessToken as string)).send({ email: "existing@example.com", role: "manager" });
+
+    const joined = await request(app).post("/api/auth/login").send({ email: "existing@example.com", password: "correct-horse-battery", inviteToken: invitation.body.invitation.token });
+
+    expect(joined.status).toBe(200);
+    const existingUserId = Number(existingRegistration.body.user.id);
+    expect(await db.select().from(schema.workspaceMemberships).where(and(eq(schema.workspaceMemberships.workspaceId, ownerMembership.workspaceId), eq(schema.workspaceMemberships.userId, existingUserId)))).toEqual([expect.objectContaining({ role: "manager", isActive: true })]);
   });
 
   it("rejects malformed registrations and case-insensitive duplicate emails", async () => {

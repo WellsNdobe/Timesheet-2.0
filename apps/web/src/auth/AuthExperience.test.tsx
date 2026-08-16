@@ -49,22 +49,25 @@ describe("workspace signup onboarding", () => {
     expect(requestBody).toEqual(expect.objectContaining({ email: "maia@example.com", organizationName: "Tempo Studio", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }));
   });
 
-  it("uses the join-only registration shape when an invitation token is present", async () => {
-    window.history.replaceState({}, "", "/signup?inviteToken=valid-invitation-token-value");
+  it("activates a provisioned invited account without showing signup", async () => {
+    window.history.replaceState({}, "", "/login?inviteToken=valid-invitation-token-value");
     let requestBody: unknown;
-    server.use(http.post("/api/auth/register", async ({ request }) => { requestBody = await request.json(); return HttpResponse.json(authResponse, { status: 201 }); }));
+    server.use(
+      http.get("/api/auth/invitations/valid-invitation-token-value", () => HttpResponse.json({ invitation: { email: "maia@example.com", workspaceName: "Tempo Studio", role: "member", requiresPasswordChange: true, expiresAt: "2026-08-22T10:00:00.000Z" } })),
+      http.post("/api/auth/invitations/activate", async ({ request }) => { requestBody = await request.json(); return HttpResponse.json(authResponse); }),
+    );
     const onAuthenticated = vi.fn();
     const user = userEvent.setup();
-    render(<AuthExperience mode="signup" onAuthenticated={onAuthenticated} />);
+    render(<AuthExperience mode="login" onAuthenticated={onAuthenticated} />);
 
-    expect(screen.getByText(/invited to an existing workspace/i)).toBeInTheDocument();
-    await user.type(screen.getByLabelText("Work email"), "maia@example.com");
+    expect(await screen.findByDisplayValue("maia@example.com")).toBeInTheDocument();
     await user.type(screen.getByLabelText("Password"), "correct-horse-battery");
-    await user.click(screen.getByRole("button", { name: "Create account and join" }));
+    await user.type(screen.getByLabelText("Confirm password"), "correct-horse-battery");
+    await user.click(screen.getByRole("button", { name: "Set password and log in" }));
 
-    await waitFor(() => expect(requestBody).toEqual({ email: "maia@example.com", password: "correct-horse-battery", inviteToken: "valid-invitation-token-value" }));
+    await waitFor(() => expect(requestBody).toEqual({ password: "correct-horse-battery", token: "valid-invitation-token-value" }));
     expect(screen.queryByLabelText("Organization name")).not.toBeInTheDocument();
-    expect(await screen.findByRole("status")).toHaveTextContent("You're all set");
+    expect(onAuthenticated).toHaveBeenCalledWith(authResponse);
   });
 
   it("keeps workspace details available when registration fails", async () => {

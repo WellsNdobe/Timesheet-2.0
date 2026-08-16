@@ -13,6 +13,7 @@ export const users = pgTable(
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     email: text("email").notNull(),
     passwordHash: text("password_hash").notNull(),
+    requiresPasswordChange: boolean("requires_password_change").notNull().default(false),
     isActive: boolean("is_active").notNull().default(true),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

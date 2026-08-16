@@ -2,6 +2,7 @@ import { and, count, eq, gt, isNull, sql } from "drizzle-orm";
 import { Router } from "express";
 import { z } from "zod";
 import { authenticate } from "../auth/middleware.js";
+import { hashPassword } from "../auth/passwords.js";
 import { db } from "../db/client.js";
 import { timesheetApprovalRevisions, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
 import { env } from "../config.js";
@@ -11,7 +12,7 @@ import { requireRole, requireWorkspaceMembership, parseWorkspaceId, workspaceRol
 import { createInvitationToken, hashInvitationToken } from "./invitations.js";
 import { audit } from "../workflow/events.js";
 
-const invitationTtlMs = 7 * 24 * 60 * 60 * 1_000;
+export const invitationTtlMs = 7 * 24 * 60 * 60 * 1_000;
 const roleSchema = z.enum(workspaceRoles);
 const invitationRoleSchema = z.enum(["manager", "member"]);
 const createInvitationSchema = z.object({
@@ -197,6 +198,7 @@ workspaceRouter.post("/:workspaceId/invitations", asyncHandler(async (request, r
   const userId = Number(response.locals.authUser.id);
   const input = parseBody(createInvitationSchema, request.body, "A valid invitation email and role are required.");
   const token = createInvitationToken();
+  const provisionedPasswordHash = await hashPassword(createInvitationToken());
   const invitationContext = await db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId})`);
     const actor = await requireAdminInTransaction(transaction, workspaceId, userId);
@@ -205,12 +207,13 @@ workspaceRouter.post("/:workspaceId/invitations", asyncHandler(async (request, r
     if (!workspace || !inviter) throw new ApiError(404, "not_found", "The requested resource was not found.");
     const [alreadyMember] = await transaction.select({ id: workspaceMemberships.id }).from(workspaceMemberships).innerJoin(users, eq(workspaceMemberships.userId, users.id)).where(and(eq(workspaceMemberships.workspaceId, workspaceId), eq(users.email, input.email), eq(workspaceMemberships.isActive, true))).limit(1);
     if (alreadyMember) throw new ApiError(409, "already_workspace_member", "This email already belongs to the workspace.");
+    await transaction.insert(users).values({ email: input.email, passwordHash: provisionedPasswordHash, requiresPasswordChange: true }).onConflictDoNothing({ target: users.email });
     await transaction.update(workspaceInvitations).set({ status: "revoked", revokedAt: new Date() }).where(and(eq(workspaceInvitations.workspaceId, workspaceId), eq(workspaceInvitations.email, input.email), eq(workspaceInvitations.status, "pending")));
     const [created] = await transaction.insert(workspaceInvitations).values({ workspaceId, email: input.email, role: input.role, tokenHash: hashInvitationToken(token), expiresAt: new Date(Date.now() + invitationTtlMs), invitedByMembershipId: actor.id }).returning();
     await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: "member_invited", details: { email: input.email, role: input.role, invitationId: String(created.id) } });
     return { invitation: created, workspaceName: workspace.name, inviterEmail: inviter.email };
   });
-  const acceptUrl = new URL("/signup", env.webOrigin);
+  const acceptUrl = new URL("/login", env.webOrigin);
   acceptUrl.searchParams.set("inviteToken", token);
   let delivery: { status: InvitationDeliveryStatus };
   try {

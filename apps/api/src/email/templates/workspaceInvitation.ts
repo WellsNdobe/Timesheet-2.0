@@ -21,7 +21,7 @@ export const workspaceInvitationEmail = (input: WorkspaceInvitationTemplateInput
   const inviterEmail = escapeHtml(input.inviterEmail);
   const recipientEmail = escapeHtml(input.recipientEmail);
   const acceptUrl = escapeHtml(input.acceptUrl);
-  const expiresOn = input.expiresAt.toLocaleDateString("en-ZA", { day: "numeric", month: "long", year: "numeric", timeZone: "Africa/Johannesburg" });
+  const expiresOn = input.expiresAt.toLocaleString("en-ZA", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "Africa/Johannesburg", timeZoneName: "short" });
   const role = roleLabel(input.role);
   const subjectWorkspace = input.workspaceName.replace(/[\r\n]+/g, " ").trim();
 
@@ -31,7 +31,8 @@ export const workspaceInvitationEmail = (input: WorkspaceInvitationTemplateInput
       `You've been invited to ${input.workspaceName} on TempoLedger.`,
       "",
       `${input.inviterEmail} invited ${input.recipientEmail} to join as a ${role}.`,
-      `Accept your invitation: ${input.acceptUrl}`,
+      `Open your invitation and activate access: ${input.acceptUrl}`,
+      "Log in with your existing TempoLedger password, or set a password if this is your first invitation.",
       "",
       `This invitation expires on ${expiresOn}. If you weren't expecting it, you can safely ignore this email.`,
       "",
@@ -50,8 +51,8 @@ export const workspaceInvitationEmail = (input: WorkspaceInvitationTemplateInput
         <p style="margin:30px 0 8px;color:#159947;font-size:12px;font-weight:800;letter-spacing:1.4px;text-transform:uppercase;">Workspace invitation</p>
         <h1 style="margin:0 0 16px;font-size:34px;line-height:1.15;letter-spacing:-1.2px;">Come work with us in<br>${workspaceName}</h1>
         <p style="margin:0 0 26px;color:#64685f;font-size:16px;line-height:1.65;">${inviterEmail} invited <strong style="color:#20231f;">${recipientEmail}</strong> to join the workspace as a <strong style="color:#20231f;">${role}</strong>.</p>
-        <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="border-radius:10px;background:#20231f;"><a href="${acceptUrl}" style="display:inline-block;padding:15px 23px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:750;">Join the workspace&nbsp; →</a></td></tr></table>
-        <p style="margin:22px 0 0;color:#85897f;font-size:13px;line-height:1.55;">This private link expires on ${expiresOn}. If you weren't expecting this invitation, you can safely ignore this email.</p>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr><td style="border-radius:10px;background:#20231f;"><a href="${acceptUrl}" style="display:inline-block;padding:15px 23px;color:#ffffff;text-decoration:none;font-size:15px;font-weight:750;">Activate workspace access&nbsp; →</a></td></tr></table>
+        <p style="margin:22px 0 0;color:#85897f;font-size:13px;line-height:1.55;">Open the link to log in, or set a password if this is your first TempoLedger invitation. This private link expires on ${expiresOn}. If you weren't expecting it, you can safely ignore this email.</p>
       </td></tr>
       <tr><td style="padding:24px 42px 38px;">
         <div style="height:1px;background:#ecece6;margin-bottom:24px;"></div>

@@ -3,7 +3,7 @@ import { Router, type CookieOptions, type RequestHandler } from "express";
 import { z } from "zod";
 import { env } from "../config.js";
 import { db } from "../db/client.js";
-import { authSessions, users, workspaceMemberships, workspaces } from "../db/schema.js";
+import { authSessions, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
 import { ApiError, asyncHandler } from "../errors.js";
 import { authenticate } from "./middleware.js";
 import { getDummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
@@ -16,6 +16,7 @@ import {
 } from "./tokens.js";
 import { toPublicUser } from "./user.js";
 import { acceptInvitationForUser } from "../workspaces/routes.js";
+import { hashInvitationToken } from "../workspaces/invitations.js";
 
 const refreshCookieName = "refresh_token";
 
@@ -38,11 +39,16 @@ const directRegistrationSchema = credentialsSchema.extend({
   timezone: timezoneSchema,
 }).strict();
 
-const invitationRegistrationSchema = credentialsSchema.extend({
+const invitationCredentialsSchema = credentialsSchema.extend({
   inviteToken: z.string().trim().min(20).max(512),
 }).strict();
 
-const registrationSchema = z.union([directRegistrationSchema, invitationRegistrationSchema]);
+const loginSchema = z.union([credentialsSchema, invitationCredentialsSchema]);
+const invitationTokenSchema = z.string().trim().min(20).max(512);
+const invitationActivationSchema = z.object({
+  token: invitationTokenSchema,
+  password: z.string().min(8).max(128),
+}).strict();
 
 const refreshCookieOptions: CookieOptions = {
   httpOnly: true,
@@ -63,7 +69,7 @@ const clearRefreshCookie = (response: Parameters<Parameters<typeof asyncHandler>
 };
 
 const parseCredentials = (body: unknown) => {
-  const result = credentialsSchema.safeParse(body);
+  const result = loginSchema.safeParse(body);
 
   if (!result.success) {
     throw new ApiError(400, "validation_error", "A valid email and a password of 8 to 128 characters are required.");
@@ -120,7 +126,7 @@ export const authRouter = Router();
 authRouter.use(limiter);
 
 authRouter.post("/register", asyncHandler(async (request, response) => {
-  const parsedRegistration = registrationSchema.safeParse(request.body);
+  const parsedRegistration = directRegistrationSchema.safeParse(request.body);
   if (!parsedRegistration.success) {
     throw new ApiError(400, "validation_error", "Valid account and workspace details are required.");
   }
@@ -134,16 +140,12 @@ authRouter.post("/register", asyncHandler(async (request, response) => {
         .values({ email: credentials.email, passwordHash })
         .returning({ id: users.id, email: users.email, createdAt: users.createdAt });
 
-      if ("inviteToken" in credentials) {
-        await acceptInvitationForUser(transaction, { id: user.id, email: user.email }, credentials.inviteToken);
-      } else {
-        const [workspace] = await transaction.insert(workspaces).values({
-          name: credentials.organizationName,
-          timezone: credentials.timezone,
-          createdByUserId: user.id,
-        }).returning({ id: workspaces.id });
-        await transaction.insert(workspaceMemberships).values({ workspaceId: workspace.id, userId: user.id, role: "admin" });
-      }
+      const [workspace] = await transaction.insert(workspaces).values({
+        name: credentials.organizationName,
+        timezone: credentials.timezone,
+        createdByUserId: user.id,
+      }).returning({ id: workspaces.id });
+      await transaction.insert(workspaceMemberships).values({ workspaceId: workspace.id, userId: user.id, role: "admin" });
 
       const refreshToken = createRefreshToken();
       await transaction.insert(authSessions).values({
@@ -177,11 +179,17 @@ authRouter.post("/login", asyncHandler(async (request, response) => {
   if (!user || !user.isActive || !passwordMatches) {
     throw new ApiError(401, "invalid_credentials", "The email or password is incorrect.");
   }
+  if (user.requiresPasswordChange) {
+    throw new ApiError(409, "password_change_required", "Open your invitation link to set a new password before logging in.");
+  }
 
   const refreshToken = createRefreshToken();
   const now = new Date();
 
   await db.transaction(async (transaction) => {
+    if ("inviteToken" in credentials) {
+      await acceptInvitationForUser(transaction, { id: user.id, email: user.email }, credentials.inviteToken);
+    }
     await transaction
       .update(users)
       .set({ lastLoginAt: now, updatedAt: now })
@@ -195,6 +203,56 @@ authRouter.post("/login", asyncHandler(async (request, response) => {
 
   setRefreshCookie(response, refreshToken);
   response.json({ user: toPublicUser(user), accessToken: await createAccessToken(user.id) });
+}));
+
+authRouter.get("/invitations/:token", asyncHandler(async (request, response) => {
+  const parsedToken = invitationTokenSchema.safeParse(request.params.token);
+  if (!parsedToken.success) throw new ApiError(404, "invitation_not_found", "The invitation is invalid, expired, or no longer available.");
+  const now = new Date();
+  const [invitation] = await db.select({
+    email: workspaceInvitations.email,
+    role: workspaceInvitations.role,
+    expiresAt: workspaceInvitations.expiresAt,
+    workspaceName: workspaces.name,
+    requiresPasswordChange: users.requiresPasswordChange,
+  }).from(workspaceInvitations)
+    .innerJoin(workspaces, eq(workspaceInvitations.workspaceId, workspaces.id))
+    .innerJoin(users, eq(workspaceInvitations.email, users.email))
+    .where(and(
+      eq(workspaceInvitations.tokenHash, hashInvitationToken(parsedToken.data)),
+      eq(workspaceInvitations.status, "pending"),
+      isNull(workspaceInvitations.revokedAt),
+      gt(workspaceInvitations.expiresAt, now),
+    )).limit(1);
+  if (!invitation) throw new ApiError(404, "invitation_not_found", "The invitation is invalid, expired, or no longer available.");
+  response.json({ invitation: { ...invitation, expiresAt: invitation.expiresAt.toISOString() } });
+}));
+
+authRouter.post("/invitations/activate", asyncHandler(async (request, response) => {
+  const parsed = invitationActivationSchema.safeParse(request.body);
+  if (!parsed.success) throw new ApiError(400, "validation_error", "A valid invitation and a password of 8 to 128 characters are required.");
+  const passwordHash = await hashPassword(parsed.data.password);
+  const refreshToken = createRefreshToken();
+  const result = await db.transaction(async (transaction) => {
+    const now = new Date();
+    const [invitation] = await transaction.select({ email: workspaceInvitations.email }).from(workspaceInvitations).where(and(
+      eq(workspaceInvitations.tokenHash, hashInvitationToken(parsed.data.token)),
+      eq(workspaceInvitations.status, "pending"),
+      isNull(workspaceInvitations.revokedAt),
+      gt(workspaceInvitations.expiresAt, now),
+    )).limit(1);
+    if (!invitation) throw new ApiError(404, "invitation_not_found", "The invitation is invalid, expired, or no longer available.");
+    const [user] = await transaction.select().from(users).where(eq(users.email, invitation.email)).limit(1);
+    if (!user || !user.isActive || !user.requiresPasswordChange) {
+      throw new ApiError(409, "login_required", "This account is already active. Log in to accept the invitation.");
+    }
+    await transaction.update(users).set({ passwordHash, requiresPasswordChange: false, lastLoginAt: now, updatedAt: now }).where(eq(users.id, user.id));
+    await acceptInvitationForUser(transaction, { id: user.id, email: user.email }, parsed.data.token);
+    await transaction.insert(authSessions).values({ userId: user.id, refreshTokenHash: hashRefreshToken(refreshToken), expiresAt: getRefreshTokenExpiry() });
+    return user;
+  });
+  setRefreshCookie(response, refreshToken);
+  response.json({ user: toPublicUser(result), accessToken: await createAccessToken(result.id) });
 }));
 
 authRouter.post("/refresh", asyncHandler(async (request, response) => {

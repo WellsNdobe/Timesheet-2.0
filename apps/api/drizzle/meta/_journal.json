@@ -64,6 +64,13 @@
       "when": 1786791600000,
       "tag": "0008_tempoledger_api_role",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786878000000,
+      "tag": "0009_invited_account_activation",
+      "breakpoints": true
     }
   ]
 }
