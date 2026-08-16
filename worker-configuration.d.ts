@@ -7,9 +7,11 @@ interface __BaseEnv_Env {
 	ASSETS: Fetcher;
 	NODE_ENV: "production";
 	API_PORT: "3000";
-	WEB_ORIGIN: "https://tempoledger-timesheet.danielndobe850.workers.dev";
+	WEB_ORIGIN: "https://tempoledger.buildly.co.za";
 	EMAIL_PROVIDER: "cloudflare";
 	EMAIL_FROM_ADDRESS: "invites@tempoledger.buildly.co.za";
+	EMAIL_PASSWORD_RESET_FROM_ADDRESS: "password-reset@tempoledger.buildly.co.za";
+	EMAIL_PASSWORD_RESET_REPLY_TO: "password-reset@tempoledger.buildly.co.za";
 	EMAIL_FROM_NAME: "TempoLedger";
 	EMAIL_REPLY_TO: "invites@tempoledger.buildly.co.za";
 }
@@ -24,7 +26,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NODE_ENV" | "API_PORT" | "WEB_ORIGIN" | "EMAIL_PROVIDER" | "EMAIL_FROM_ADDRESS" | "EMAIL_FROM_NAME" | "EMAIL_REPLY_TO">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "NODE_ENV" | "API_PORT" | "WEB_ORIGIN" | "EMAIL_PROVIDER" | "EMAIL_FROM_ADDRESS" | "EMAIL_PASSWORD_RESET_FROM_ADDRESS" | "EMAIL_PASSWORD_RESET_REPLY_TO" | "EMAIL_FROM_NAME" | "EMAIL_REPLY_TO">> {}
 }
 declare module "*.png" {
 	const value: ArrayBuffer;

@@ -35,7 +35,7 @@
   "vars": {
     "NODE_ENV": "production",
     "API_PORT": "3000",
-    "WEB_ORIGIN": "https://tempoledger-timesheet.danielndobe850.workers.dev",
+    "WEB_ORIGIN": "https://tempoledger.buildly.co.za",
     "EMAIL_PROVIDER": "cloudflare",
     "EMAIL_FROM_ADDRESS": "invites@tempoledger.buildly.co.za",
     "EMAIL_PASSWORD_RESET_FROM_ADDRESS": "password-reset@tempoledger.buildly.co.za",
