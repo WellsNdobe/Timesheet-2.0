@@ -1,9 +1,10 @@
 import { env } from "../config.js";
-import headerImage from "./assets/tempoledger-invite-header.png";
 import { sendTransactionalEmail } from "./sendTransactionalEmail.js";
 import { passwordResetEmail, type PasswordResetTemplateInput } from "./templates/passwordReset.js";
 
 export const sendPasswordReset = async (input: PasswordResetTemplateInput) => {
+  if (env.email.provider === "disabled") return { status: "disabled" as const };
+  const { default: headerImage } = await import("./assets/tempoledger-invite-header.png");
   const content = passwordResetEmail(input);
   return sendTransactionalEmail({
     fromAddress: env.email.passwordResetFromAddress!,

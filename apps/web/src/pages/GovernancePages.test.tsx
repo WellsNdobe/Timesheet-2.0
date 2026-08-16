@@ -54,6 +54,42 @@ describe("member governance", () => {
     expect(within(role).queryByRole("option", { name: "Admin" })).not.toBeInTheDocument();
     expect(within(role).getByRole("option", { name: "Manager" })).toBeInTheDocument();
   });
+
+  it("locks the invitation form while sending and reuses its request key after failure", async () => {
+    const keys: string[] = [];
+    let attempts = 0;
+    let releaseFirstAttempt!: () => void;
+    const firstAttemptPending = new Promise<void>((resolve) => { releaseFirstAttempt = resolve; });
+    server.use(
+      http.get("/api/workspaces/1/members", () => HttpResponse.json({ members: [] })),
+      http.get("/api/workspaces/1/audit-events", () => HttpResponse.json({ events: [] })),
+      http.post("/api/workspaces/1/invitations", async ({ request }) => {
+        keys.push(request.headers.get("Idempotency-Key") ?? "");
+        attempts += 1;
+        if (attempts === 1) { await firstAttemptPending; return HttpResponse.json({ error: { code: "temporary", message: "Try again." } }, { status: 500 }); }
+        return HttpResponse.json({ delivery: { status: "sent" }, invitation: { id: "70", email: "invitee@example.com", role: "member", token: "token", acceptUrl: "http://localhost/login?inviteToken=token", expiresAt: "2026-08-20T00:00:00.000Z" } }, { status: 201 });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<MembersPage workspace={adminWorkspace} accessToken="token" onNavigate={() => {}} />);
+    await screen.findByText("No governance changes yet.");
+    await user.click(screen.getByRole("button", { name: "Invite member" }));
+    await user.type(screen.getByRole("textbox", { name: "Email" }), "invitee@example.com");
+    await user.click(screen.getByRole("button", { name: "Send invitation" }));
+    const sending = await screen.findByRole("button", { name: "Sending invitation…" });
+    expect(sending).toBeDisabled();
+    expect(sending).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("textbox", { name: "Email" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(attempts).toBe(1);
+    releaseFirstAttempt();
+    expect(await screen.findByText("Try again.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Send invitation" }));
+    expect(await screen.findByText(/Invitation email sent/)).toBeInTheDocument();
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(keys[1]).toBe(keys[0]);
+  });
 });
 
 describe("project approver governance", () => {
@@ -77,5 +113,35 @@ describe("project approver governance", () => {
     render(<ProjectsPage workspace={managerWorkspace} accessToken="token" />);
     expect(await screen.findByRole("combobox", { name: "Primary approver" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Archive" })).not.toBeInTheDocument();
+  });
+
+  it("shows and locks the project creation loading state", async () => {
+    let resolveRequest!: () => void;
+    const pending = new Promise<void>((resolve) => { resolveRequest = resolve; });
+    let requests = 0;
+    server.use(
+      http.get("/api/workspaces/1/projects", () => HttpResponse.json({ projects: [] })),
+      http.get("/api/workspaces/1/members", () => HttpResponse.json({ members })),
+      http.post("/api/workspaces/1/projects", async ({ request }) => {
+        requests += 1;
+        expect(request.headers.get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/i);
+        await pending;
+        return HttpResponse.json({ project: { id: "99", workspaceId: "1", name: "New project", approverMembershipId: null, approver: null, isArchived: false, submissionReady: false, createdAt: "2026-08-01T00:00:00.000Z", updatedAt: "2026-08-01T00:00:00.000Z" } }, { status: 201 });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<ProjectsPage workspace={adminWorkspace} accessToken="token" />);
+    await screen.findByText("Projects");
+    await user.click(screen.getByRole("button", { name: "New project" }));
+    await user.type(screen.getByRole("textbox", { name: "Project name" }), "New project");
+    await user.click(screen.getByRole("button", { name: "Create project" }));
+    const saving = await screen.findByRole("button", { name: "Creating project…" });
+    expect(saving).toBeDisabled();
+    expect(saving).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("textbox", { name: "Project name" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(requests).toBe(1);
+    resolveRequest();
+    expect(await screen.findByRole("button", { name: "New project" })).toBeInTheDocument();
   });
 });

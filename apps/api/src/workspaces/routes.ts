@@ -1,13 +1,14 @@
-import { and, count, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, count, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import { Router } from "express";
 import { z } from "zod";
 import { authenticate } from "../auth/middleware.js";
 import { hashPassword } from "../auth/passwords.js";
 import { db } from "../db/client.js";
-import { timesheetApprovalRevisions, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
+import { idempotencyOperations, timesheetApprovalRevisions, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
 import { env } from "../config.js";
 import { sendWorkspaceInvitation, type InvitationDeliveryStatus } from "../email/sendWorkspaceInvitation.js";
 import { ApiError, asyncHandler } from "../errors.js";
+import { decryptIdempotencyResponse, encryptIdempotencyResponse, fingerprintRequest, idempotencyKeyReused, idempotencyTtlMs, parseIdempotencyKey, staleOperationMs } from "../idempotency.js";
 import { requireRole, requireWorkspaceMembership, parseWorkspaceId, workspaceRoles, type WorkspaceMembership, type WorkspaceRole } from "./access.js";
 import { createInvitationToken, hashInvitationToken } from "./invitations.js";
 import { audit } from "../workflow/events.js";
@@ -197,11 +198,35 @@ workspaceRouter.post("/:workspaceId/invitations", asyncHandler(async (request, r
   await requireWorkspaceMembership(response, workspaceId);
   const userId = Number(response.locals.authUser.id);
   const input = parseBody(createInvitationSchema, request.body, "A valid invitation email and role are required.");
-  const token = createInvitationToken();
-  const provisionedPasswordHash = await hashPassword(createInvitationToken());
-  const invitationContext = await db.transaction(async (transaction) => {
+  const idempotencyKey = parseIdempotencyKey(request);
+  const requestFingerprint = fingerprintRequest(input);
+  type InvitationResponse = {
+    delivery: { status: InvitationDeliveryStatus };
+    invitation: { id: string; email: string; role: WorkspaceRole; status: string; expiresAt: string; token: string; acceptUrl: string };
+  };
+  const operation = await db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId})`);
     const actor = await requireAdminInTransaction(transaction, workspaceId, userId);
+    const now = new Date();
+    await transaction.delete(idempotencyOperations).where(lt(idempotencyOperations.expiresAt, now));
+    const [existing] = await transaction.select().from(idempotencyOperations).where(and(
+      eq(idempotencyOperations.workspaceId, workspaceId),
+      eq(idempotencyOperations.actorMembershipId, actor.id),
+      eq(idempotencyOperations.operation, "workspace_invitation_create"),
+      eq(idempotencyOperations.key, idempotencyKey),
+    )).limit(1);
+    if (existing) {
+      if (existing.requestFingerprint !== requestFingerprint) throw idempotencyKeyReused();
+      if (!existing.responsePayload) throw new Error("An idempotency operation is missing its response payload");
+      const cached = decryptIdempotencyResponse<InvitationResponse>(existing.responsePayload);
+      if (existing.state === "completed") return { kind: "replay" as const, body: cached };
+      if (existing.updatedAt.getTime() > now.getTime() - staleOperationMs) return { kind: "processing" as const };
+      const failed = { ...cached, delivery: { status: "failed" as const } };
+      await transaction.update(idempotencyOperations).set({ state: "completed", responseStatus: 201, responsePayload: encryptIdempotencyResponse(failed), updatedAt: now }).where(eq(idempotencyOperations.id, existing.id));
+      return { kind: "replay" as const, body: failed };
+    }
+    const token = createInvitationToken();
+    const provisionedPasswordHash = await hashPassword(createInvitationToken());
     const [workspace] = await transaction.select({ name: workspaces.name }).from(workspaces).where(eq(workspaces.id, workspaceId)).limit(1);
     const [inviter] = await transaction.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
     if (!workspace || !inviter) throw new ApiError(404, "not_found", "The requested resource was not found.");
@@ -211,27 +236,45 @@ workspaceRouter.post("/:workspaceId/invitations", asyncHandler(async (request, r
     await transaction.update(workspaceInvitations).set({ status: "revoked", revokedAt: new Date() }).where(and(eq(workspaceInvitations.workspaceId, workspaceId), eq(workspaceInvitations.email, input.email), eq(workspaceInvitations.status, "pending")));
     const [created] = await transaction.insert(workspaceInvitations).values({ workspaceId, email: input.email, role: input.role, tokenHash: hashInvitationToken(token), expiresAt: new Date(Date.now() + invitationTtlMs), invitedByMembershipId: actor.id }).returning();
     await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: "member_invited", details: { email: input.email, role: input.role, invitationId: String(created.id) } });
-    return { invitation: created, workspaceName: workspace.name, inviterEmail: inviter.email };
+    const acceptUrl = new URL("/login", env.webOrigin);
+    acceptUrl.searchParams.set("inviteToken", token);
+    const draft: InvitationResponse = {
+      delivery: { status: "failed" },
+      invitation: { id: String(created.id), email: created.email, role: created.role, status: created.status, expiresAt: created.expiresAt.toISOString(), token, acceptUrl: acceptUrl.toString() },
+    };
+    const [claimed] = await transaction.insert(idempotencyOperations).values({ workspaceId, actorMembershipId: actor.id, operation: "workspace_invitation_create", key: idempotencyKey, requestFingerprint, resourceId: created.id, responsePayload: encryptIdempotencyResponse(draft), expiresAt: new Date(now.getTime() + idempotencyTtlMs) }).returning({ id: idempotencyOperations.id });
+    return { kind: "created" as const, operationId: claimed.id, invitation: created, workspaceName: workspace.name, inviterEmail: inviter.email, acceptUrl: acceptUrl.toString(), draft };
   });
-  const acceptUrl = new URL("/login", env.webOrigin);
-  acceptUrl.searchParams.set("inviteToken", token);
+  if (operation.kind === "processing") {
+    response.set("Retry-After", "1");
+    response.status(409).json({ error: { code: "idempotency_in_progress", message: "A request with this Idempotency-Key is still being processed." } });
+    return;
+  }
+  if (operation.kind === "replay") {
+    response.status(201).json(operation.body);
+    return;
+  }
   let delivery: { status: InvitationDeliveryStatus };
   try {
     delivery = await sendWorkspaceInvitation({
-      recipientEmail: invitationContext.invitation.email,
-      inviterEmail: invitationContext.inviterEmail,
-      workspaceName: invitationContext.workspaceName,
+      recipientEmail: operation.invitation.email,
+      inviterEmail: operation.inviterEmail,
+      workspaceName: operation.workspaceName,
       role: input.role,
-      acceptUrl: acceptUrl.toString(),
-      expiresAt: invitationContext.invitation.expiresAt,
+      acceptUrl: operation.acceptUrl,
+      expiresAt: operation.invitation.expiresAt,
     });
   } catch (error) {
     console.error("Workspace invitation email delivery failed", { error: error instanceof Error ? error.name : "UnknownError" });
     delivery = { status: "failed" };
   }
-  const invitation = invitationContext.invitation;
-  response.status(201).json({
-    delivery,
-    invitation: { id: String(invitation.id), email: invitation.email, role: invitation.role, status: invitation.status, expiresAt: invitation.expiresAt.toISOString(), token, acceptUrl: acceptUrl.toString() },
-  });
+  const body: InvitationResponse = { ...operation.draft, delivery };
+  const [finalized] = await db.update(idempotencyOperations).set({ state: "completed", responseStatus: 201, responsePayload: encryptIdempotencyResponse(body), updatedAt: new Date() }).where(and(eq(idempotencyOperations.id, operation.operationId), eq(idempotencyOperations.state, "processing"))).returning({ responsePayload: idempotencyOperations.responsePayload });
+  if (finalized?.responsePayload) {
+    response.status(201).json(body);
+    return;
+  }
+  const [completed] = await db.select({ responsePayload: idempotencyOperations.responsePayload }).from(idempotencyOperations).where(eq(idempotencyOperations.id, operation.operationId)).limit(1);
+  if (!completed?.responsePayload) throw new Error("The invitation idempotency operation could not be finalized");
+  response.status(201).json(decryptIdempotencyResponse<InvitationResponse>(completed.responsePayload));
 }));

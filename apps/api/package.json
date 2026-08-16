@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:local": "tsx watch src/local.ts",
     "start": "tsx src/index.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:local": "drizzle-kit migrate --config drizzle.local.config.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

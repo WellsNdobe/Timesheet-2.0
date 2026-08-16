@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, date, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, date, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 export const workspaceRoleEnum = pgEnum("workspace_role", ["admin", "manager", "member"]);
 export const invitationStatusEnum = pgEnum("invitation_status", ["pending", "accepted", "revoked"]);
@@ -178,6 +178,30 @@ export const timesheetApprovalItems = pgTable(
   },
   (table) => [
     uniqueIndex("timesheet_approval_items_timesheet_project_unique").on(table.weeklyTimesheetId, table.projectId),
+  ],
+);
+
+export const idempotencyOperations = pgTable(
+  "idempotency_operations",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    actorMembershipId: bigint("actor_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id, { onDelete: "cascade" }),
+    operation: text("operation").notNull(),
+    key: uuid("key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    state: text("state").notNull().default("processing"),
+    resourceId: bigint("resource_id", { mode: "number" }),
+    responseStatus: integer("response_status"),
+    responsePayload: text("response_payload"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idempotency_operations_scope_key_unique").on(table.workspaceId, table.actorMembershipId, table.operation, table.key),
+    index("idempotency_operations_expiry_index").on(table.expiresAt),
+    check("idempotency_operations_state_valid", sql`${table.state} in ('processing', 'completed')`),
   ],
 );
 

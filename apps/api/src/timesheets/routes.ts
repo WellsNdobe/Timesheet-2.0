@@ -4,11 +4,12 @@ import { z } from "zod";
 import { authenticate } from "../auth/middleware.js";
 import { db } from "../db/client.js";
 import {
-  projects, tasks, timeEntries, timesheetApprovalItems, timesheetApprovalRevisions,
+  idempotencyOperations, projects, tasks, timeEntries, timesheetApprovalItems, timesheetApprovalRevisions,
   timesheetReviewEntrySnapshots, timesheetReviewEvents, weeklyTimesheets,
   users, workspaceMemberships, workspaces,
 } from "../db/schema.js";
 import { ApiError, asyncHandler } from "../errors.js";
+import { decryptIdempotencyResponse, encryptIdempotencyResponse, fingerprintRequest, idempotencyKeyReused, idempotencyTtlMs, parseIdempotencyKey } from "../idempotency.js";
 import {
   insufficientPermissions, notFound, parseResourceId, requireAdmin,
   requireAssignedApprover, requireAssignedProjectManager, requireManagerOrAdmin,
@@ -154,15 +155,28 @@ timesheetRouter.get("/workspaces/:workspaceId/projects", asyncHandler(async (req
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/projects", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); const userId = Number(response.locals.authUser.id); const input = parse(projectSchema, request.body);
-  const project = await db.transaction(async (transaction) => {
+  const workspaceId = paramId(request.params.workspaceId); const userId = Number(response.locals.authUser.id); const input = parse(projectSchema, request.body); const idempotencyKey = parseIdempotencyKey(request); const requestFingerprint = fingerprintRequest(input);
+  const body = await db.transaction(async (transaction) => {
     await lockWorkspaceGovernance(transaction, workspaceId); const actor = await membershipInTransaction(transaction, workspaceId, userId); requireAdmin(actor);
+    const now = new Date();
+    await transaction.delete(idempotencyOperations).where(lt(idempotencyOperations.expiresAt, now));
+    const [existing] = await transaction.select().from(idempotencyOperations).where(and(eq(idempotencyOperations.workspaceId, workspaceId), eq(idempotencyOperations.actorMembershipId, actor.id), eq(idempotencyOperations.operation, "project_create"), eq(idempotencyOperations.key, idempotencyKey))).limit(1);
+    if (existing) {
+      if (existing.requestFingerprint !== requestFingerprint) throw idempotencyKeyReused();
+      if (existing.state !== "completed" || !existing.responsePayload) {
+        response.set("Retry-After", "1");
+        throw new ApiError(409, "idempotency_in_progress", "A request with this Idempotency-Key is still being processed.");
+      }
+      return decryptIdempotencyResponse<{ project: ReturnType<typeof publicProject> }>(existing.responsePayload);
+    }
     if (input.approverMembershipId != null && !await eligibleApprover(transaction, workspaceId, input.approverMembershipId)) throw new ApiError(400, "invalid_approver", "Approver must be an active manager or admin in this workspace.");
     const [created] = await transaction.insert(projects).values({ workspaceId, name: input.name, approverMembershipId: input.approverMembershipId ?? null }).returning();
     await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: "project_created", targetProjectId: created.id, details: { name: created.name, approverMembershipId: created.approverMembershipId == null ? null : String(created.approverMembershipId) } });
-    return created;
+    const createdBody = { project: publicProject(created) };
+    await transaction.insert(idempotencyOperations).values({ workspaceId, actorMembershipId: actor.id, operation: "project_create", key: idempotencyKey, requestFingerprint, state: "completed", resourceId: created.id, responseStatus: 201, responsePayload: encryptIdempotencyResponse(createdBody), expiresAt: new Date(now.getTime() + idempotencyTtlMs) });
+    return createdBody;
   });
-  response.status(201).json({ project: publicProject(project) });
+  response.status(201).json(body);
 }));
 
 timesheetRouter.patch("/workspaces/:workspaceId/projects/:projectId", asyncHandler(async (request, response) => {

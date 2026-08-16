@@ -1,13 +1,86 @@
-
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClientError, inviteMember, loadAuditEvents, loadMembers, updateMember, type AuditEvent, type WorkspaceMember } from "../api/client";
 import { Icon } from "../components/Icon";
 import type { WorkspaceSummary, WorkspaceRole } from "../types/workspace";
 
 export function MembersPage({ workspace, accessToken, onNavigate }: { workspace: WorkspaceSummary; accessToken: string; onNavigate: (path: string) => void }) {
-  const [members, setMembers] = useState<WorkspaceMember[]>([]); const [events, setEvents] = useState<AuditEvent[]>([]); const [state, setState] = useState<"loading" | "ready" | "error">("loading"); const [inviteOpen, setInviteOpen] = useState(false); const [email, setEmail] = useState(""); const [role, setRole] = useState<"manager" | "member">("member"); const [message, setMessage] = useState("");
-  const load = useCallback(async () => { setState("loading"); try { const [people, history] = await Promise.all([loadMembers(workspace.id, accessToken), loadAuditEvents(workspace.id, accessToken)]); setMembers(people); setEvents(history); setState("ready"); } catch { setState("error"); } }, [accessToken, workspace.id]); useEffect(() => { void load(); }, [load]);
-  const change = async (member: WorkspaceMember, changes: { role?: WorkspaceRole; isActive?: boolean }) => { setMessage(""); try { await updateMember(workspace.id, member.id, changes, accessToken); await load(); } catch (error) { setMessage(error instanceof ApiClientError && error.code === "pending_approvals" ? `${member.email} has ${member.pendingApprovalCount} pending approval(s). Transfer them before changing access.` : error instanceof Error ? error.message : "The member could not be updated."); } };
-  const invite = async () => { if (!email.trim()) return; setMessage(""); try { const result = await inviteMember(workspace.id, email, role, accessToken); setInviteOpen(false); setEmail(""); const expires = new Date(result.invitation.expiresAt).toLocaleString(); const deliveryMessages = { sent: `Invitation email sent to ${result.invitation.email}. The link expires ${expires}.`, queued: `Invitation email to ${result.invitation.email} is queued for delivery. The link expires ${expires}.`, disabled: `Invitation created and valid until ${expires}, but email delivery is not configured. Share this link securely: ${result.invitation.acceptUrl}`, failed: `Invitation created and valid until ${expires}, but its email could not be delivered. Share this link securely: ${result.invitation.acceptUrl}` }; setMessage(deliveryMessages[result.delivery.status]); await load(); } catch (error) { setMessage(error instanceof Error ? error.message : "The invitation could not be sent."); } };
-  return <><header className="content-header"><div><p className="breadcrumb">Manage <Icon name="chevron" size={13} /> Workspace</p><h1>Members</h1><p className="page-subtitle">Manage roles, access, invitations, and workflow ownership.</p></div><button className="primary-button" onClick={() => setInviteOpen(true)}><Icon name="plus" size={15} /> Invite member</button></header>{message && <div className="inline-alert">{message}</div>}{state === "loading" ? <div className="panel inline-state"><strong>Loading members</strong></div> : state === "error" ? <div className="panel inline-state"><strong>Members unavailable</strong><button className="subtle-button" onClick={() => void load()}>Try again</button></div> : <section className="governance-grid"><div className="panel data-panel"><div className="data-scroll"><table className="data-table"><thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Pending reviews</th><th>Access</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td><strong>{member.email}</strong><small>Joined {new Date(member.joinedAt).toLocaleDateString()}</small></td><td><select value={member.role} disabled={!member.isActive} onChange={(event) => void change(member, { role: event.target.value as WorkspaceRole })}><option value="member">Member</option><option value="manager">Manager</option><option value="admin">Admin</option></select></td><td><span className={`status-pill ${member.isActive ? "status-pill--approved" : "status-pill--withdrawn"}`}>{member.isActive ? "Active" : "Inactive"}</span></td><td>{member.pendingApprovalCount ? <button className="link-button warning-text" onClick={() => onNavigate("/approvals")}>{member.pendingApprovalCount} · transfer in Approvals</button> : "—"}</td><td><button className="subtle-button" onClick={() => void change(member, { isActive: !member.isActive })}>{member.isActive ? "Deactivate" : "Reactivate"}</button></td></tr>)}</tbody></table></div></div><aside className="panel audit-panel"><h2>Governance history</h2>{events.length === 0 ? <p>No governance changes yet.</p> : events.slice(0, 12).map((event) => <div key={event.id}><strong>{event.type.replaceAll("_", " ")}</strong><span>{new Date(event.createdAt).toLocaleString()}</span></div>)}</aside></section>}{inviteOpen && <div className="modal-backdrop" onClick={() => setInviteOpen(false)}><section className="log-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}><div className="modal-heading"><div><p className="section-kicker">WORKSPACE ACCESS</p><h2>Invite member</h2></div><button className="bare-button" onClick={() => setInviteOpen(false)}><Icon name="close" /></button></div><label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" /></label><label>Role<select value={role} onChange={(event) => setRole(event.target.value as "manager" | "member")}><option value="member">Member</option><option value="manager">Manager</option></select></label><div className="modal-actions"><button className="subtle-button" onClick={() => setInviteOpen(false)}>Cancel</button><button className="primary-button" disabled={!email.trim()} onClick={() => void invite()}>Send invitation</button></div></section></div>}</>;
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"manager" | "member">("member");
+  const [message, setMessage] = useState("");
+  const [isInviting, setIsInviting] = useState(false);
+  const inviteAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const inviteInFlight = useRef(false);
+
+  const load = useCallback(async () => {
+    setState("loading");
+    try {
+      const [people, history] = await Promise.all([loadMembers(workspace.id, accessToken), loadAuditEvents(workspace.id, accessToken)]);
+      setMembers(people);
+      setEvents(history);
+      setState("ready");
+    } catch {
+      setState("error");
+    }
+  }, [accessToken, workspace.id]);
+  useEffect(() => { void load(); }, [load]);
+
+  const change = async (member: WorkspaceMember, changes: { role?: WorkspaceRole; isActive?: boolean }) => {
+    setMessage("");
+    try {
+      await updateMember(workspace.id, member.id, changes, accessToken);
+      await load();
+    } catch (error) {
+      setMessage(error instanceof ApiClientError && error.code === "pending_approvals" ? `${member.email} has ${member.pendingApprovalCount} pending approval(s). Transfer them before changing access.` : error instanceof Error ? error.message : "The member could not be updated.");
+    }
+  };
+
+  const invite = async () => {
+    if (inviteInFlight.current || !email.trim()) return;
+    const normalizedEmail = email.trim().toLowerCase();
+    const fingerprint = JSON.stringify({ email: normalizedEmail, role });
+    const attempt = inviteAttempt.current?.fingerprint === fingerprint ? inviteAttempt.current : { fingerprint, key: crypto.randomUUID() };
+    inviteAttempt.current = attempt;
+    inviteInFlight.current = true;
+    setMessage("");
+    setIsInviting(true);
+    try {
+      const result = await inviteMember(workspace.id, normalizedEmail, role, attempt.key, accessToken);
+      inviteAttempt.current = null;
+      setInviteOpen(false);
+      setEmail("");
+      const expires = new Date(result.invitation.expiresAt).toLocaleString();
+      const deliveryMessages = {
+        sent: `Invitation email sent to ${result.invitation.email}. The link expires ${expires}.`,
+        queued: `Invitation email to ${result.invitation.email} is queued for delivery. The link expires ${expires}.`,
+        disabled: `Invitation created and valid until ${expires}, but email delivery is not configured. Share this link securely: ${result.invitation.acceptUrl}`,
+        failed: `Invitation created and valid until ${expires}, but its email could not be delivered. Share this link securely: ${result.invitation.acceptUrl}`,
+      };
+      setMessage(deliveryMessages[result.delivery.status]);
+      await load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "The invitation could not be sent.");
+    } finally {
+      inviteInFlight.current = false;
+      setIsInviting(false);
+    }
+  };
+
+  return <>
+    <header className="content-header"><div><p className="breadcrumb">Manage <Icon name="chevron" size={13} /> Workspace</p><h1>Members</h1><p className="page-subtitle">Manage roles, access, invitations, and workflow ownership.</p></div><button className="primary-button" onClick={() => setInviteOpen(true)}><Icon name="plus" size={15} /> Invite member</button></header>
+    {message && <div className="inline-alert">{message}</div>}
+    {state === "loading" ? <div className="panel inline-state"><strong>Loading members</strong></div> : state === "error" ? <div className="panel inline-state"><strong>Members unavailable</strong><button className="subtle-button" onClick={() => void load()}>Try again</button></div> : <section className="governance-grid">
+      <div className="panel data-panel"><div className="data-scroll"><table className="data-table"><thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Pending reviews</th><th>Access</th></tr></thead><tbody>{members.map((member) => <tr key={member.id}><td><strong>{member.email}</strong><small>Joined {new Date(member.joinedAt).toLocaleDateString()}</small></td><td><select value={member.role} disabled={!member.isActive} onChange={(event) => void change(member, { role: event.target.value as WorkspaceRole })}><option value="member">Member</option><option value="manager">Manager</option><option value="admin">Admin</option></select></td><td><span className={`status-pill ${member.isActive ? "status-pill--approved" : "status-pill--withdrawn"}`}>{member.isActive ? "Active" : "Inactive"}</span></td><td>{member.pendingApprovalCount ? <button className="link-button warning-text" onClick={() => onNavigate("/approvals")}>{member.pendingApprovalCount} · transfer in Approvals</button> : "—"}</td><td><button className="subtle-button" onClick={() => void change(member, { isActive: !member.isActive })}>{member.isActive ? "Deactivate" : "Reactivate"}</button></td></tr>)}</tbody></table></div></div>
+      <aside className="panel audit-panel"><h2>Governance history</h2>{events.length === 0 ? <p>No governance changes yet.</p> : events.slice(0, 12).map((event) => <div key={event.id}><strong>{event.type.replaceAll("_", " ")}</strong><span>{new Date(event.createdAt).toLocaleString()}</span></div>)}</aside>
+    </section>}
+    {inviteOpen && <div className="modal-backdrop" onClick={() => { if (!isInviting) setInviteOpen(false); }}><section className="log-modal" role="dialog" aria-modal="true" aria-busy={isInviting} onClick={(event) => event.stopPropagation()}>
+      <div className="modal-heading"><div><p className="section-kicker">WORKSPACE ACCESS</p><h2>Invite member</h2></div><button className="bare-button" disabled={isInviting} onClick={() => setInviteOpen(false)} aria-label="Close invitation form"><Icon name="close" /></button></div>
+      <label>Email<input type="email" value={email} disabled={isInviting} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" /></label>
+      <label>Role<select value={role} disabled={isInviting} onChange={(event) => setRole(event.target.value as "manager" | "member")}><option value="member">Member</option><option value="manager">Manager</option></select></label>
+      <div className="modal-actions"><button className="subtle-button" disabled={isInviting} onClick={() => setInviteOpen(false)}>Cancel</button><button className="primary-button" disabled={isInviting || !email.trim()} aria-busy={isInviting} onClick={() => void invite()}>{isInviting && <span className="button-spinner" aria-hidden="true" />}{isInviting ? "Sending invitation…" : "Send invitation"}</button></div>
+    </section></div>}
+  </>;
 }

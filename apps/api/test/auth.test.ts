@@ -62,6 +62,8 @@ const createRoleFixture = async () => {
 };
 
 const auth = (token: string) => ({ Authorization: `Bearer ${token}` });
+let idempotencySequence = 0;
+const idempotentAuth = (token: string, key = `00000000-0000-4000-8000-${String(++idempotencySequence).padStart(12, "0")}`) => ({ ...auth(token), "Idempotency-Key": key });
 
 beforeAll(async () => {
   const target = new URL(testDatabaseUrl);
@@ -101,6 +103,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  await db.delete(schema.idempotencyOperations);
   await db.delete(schema.workflowNotifications);
   await db.delete(schema.workspaceAuditEvents);
   await db.delete(schema.timesheetReviewEntrySnapshots);
@@ -160,7 +163,7 @@ describe.sequential("email authentication", () => {
     const [ownerMembership] = await db.select().from(schema.workspaceMemberships);
     const invitation = await request(app)
       .post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`)
-      .set(auth(adminRegistration.body.accessToken as string))
+      .set(idempotentAuth(adminRegistration.body.accessToken as string))
       .send({ email: "invitee@example.com", role: "member" });
 
     const [provisionedUser] = await db.select().from(schema.users).where(eq(schema.users.email, "invitee@example.com"));
@@ -194,7 +197,7 @@ describe.sequential("email authentication", () => {
   it("rejects an invitation only after its stored expiry deadline", async () => {
     const ownerRegistration = await register("owner@example.com");
     const [ownerMembership] = await db.select().from(schema.workspaceMemberships);
-    const invitation = await request(app).post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`).set(auth(ownerRegistration.body.accessToken as string)).send({ email: "invitee@example.com", role: "member" });
+    const invitation = await request(app).post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`).set(idempotentAuth(ownerRegistration.body.accessToken as string)).send({ email: "invitee@example.com", role: "member" });
     await db.update(schema.workspaceInvitations).set({ expiresAt: new Date(Date.now() - 1_000) }).where(eq(schema.workspaceInvitations.email, "invitee@example.com"));
 
     expect((await request(app).get(`/api/auth/invitations/${invitation.body.invitation.token}`)).status).toBe(404);
@@ -206,7 +209,7 @@ describe.sequential("email authentication", () => {
     const existingRegistration = await register("existing@example.com");
     const [ownerUser] = await db.select().from(schema.users).where(eq(schema.users.email, "owner@example.com"));
     const [ownerMembership] = await db.select().from(schema.workspaceMemberships).where(eq(schema.workspaceMemberships.userId, ownerUser.id));
-    const invitation = await request(app).post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`).set(auth(ownerRegistration.body.accessToken as string)).send({ email: "existing@example.com", role: "manager" });
+    const invitation = await request(app).post(`/api/workspaces/${ownerMembership.workspaceId}/invitations`).set(idempotentAuth(ownerRegistration.body.accessToken as string)).send({ email: "existing@example.com", role: "manager" });
 
     const joined = await request(app).post("/api/auth/login").send({ email: "existing@example.com", password: "correct-horse-battery", inviteToken: invitation.body.invitation.token });
 
@@ -388,10 +391,10 @@ describe.sequential("role authorization", () => {
 
     const managerMembers = await request(app).get(`/api/workspaces/${fixture.workspaceId}/members`).set(auth(fixture.manager.token));
     const memberMembers = await request(app).get(`/api/workspaces/${fixture.workspaceId}/members`).set(auth(fixture.member.token));
-    const managerInvite = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.manager.token)).send({ email: "new@example.com" });
-    const memberProject = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(auth(fixture.member.token)).send({ name: "Member project" });
-    const managerProject = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(auth(fixture.manager.token)).send({ name: "Manager project" });
-    const adminProject = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(auth(fixture.admin.token)).send({ name: "Created by Admin" });
+    const managerInvite = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.manager.token)).send({ email: "new@example.com" });
+    const memberProject = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(idempotentAuth(fixture.member.token)).send({ name: "Member project" });
+    const managerProject = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(idempotentAuth(fixture.manager.token)).send({ name: "Manager project" });
+    const adminProject = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(idempotentAuth(fixture.admin.token)).send({ name: "Created by Admin" });
 
     expect(managerMembers.status).toBe(200);
     expect(memberMembers.status).toBe(403);
@@ -693,10 +696,10 @@ describe.sequential("remaining approval workflow", () => {
 
   it("creates bounded-role invitations, revokes duplicate pending invites, and audits the action", async () => {
     const fixture = await createRoleFixture();
-    const invalidRole = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "invitee@example.com", role: "admin" });
-    const activeMember = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "MEMBER@example.com", role: "member" });
-    const first = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: " Invitee@Example.com ", role: "member" });
-    const replacement = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "invitee@example.com", role: "manager" });
+    const invalidRole = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token)).send({ email: "invitee@example.com", role: "admin" });
+    const activeMember = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token)).send({ email: "MEMBER@example.com", role: "member" });
+    const first = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token)).send({ email: " Invitee@Example.com ", role: "member" });
+    const replacement = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token)).send({ email: "invitee@example.com", role: "manager" });
     const listed = await request(app).get(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token));
     const events = await request(app).get(`/api/workspaces/${fixture.workspaceId}/audit-events`).set(auth(fixture.admin.token));
 
@@ -711,5 +714,64 @@ describe.sequential("remaining approval workflow", () => {
       expect.objectContaining({ id: replacement.body.invitation.id, status: "pending" }),
     ]));
     expect(events.body.events.filter((event: { type: string }) => event.type === "member_invited")).toHaveLength(2);
+  });
+
+  it("replays project creation for the same key and rejects a changed payload", async () => {
+    const fixture = await createRoleFixture();
+    const key = "10000000-0000-4000-8000-000000000001";
+    const first = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(idempotentAuth(fixture.admin.token, key)).send({ name: "Idempotent project", approverMembershipId: fixture.manager.membership.id });
+    const replay = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(idempotentAuth(fixture.admin.token, key)).send({ name: "Idempotent project", approverMembershipId: fixture.manager.membership.id });
+    const mismatch = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set(idempotentAuth(fixture.admin.token, key)).send({ name: "Different project", approverMembershipId: fixture.manager.membership.id });
+    const matchingProjects = await db.select().from(schema.projects).where(eq(schema.projects.name, "Idempotent project"));
+    const matchingEvents = (await db.select().from(schema.workspaceAuditEvents)).filter((event) => event.type === "project_created" && event.targetProjectId === matchingProjects[0]?.id);
+
+    expect(first.status).toBe(201);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+    expect(mismatch.status).toBe(409);
+    expect(mismatch.body.error.code).toBe("idempotency_key_reused");
+    expect(matchingProjects).toHaveLength(1);
+    expect(matchingEvents).toHaveLength(1);
+  });
+
+  it("replays invitations without replacing them and safely resolves abandoned operations", async () => {
+    const fixture = await createRoleFixture();
+    const key = "20000000-0000-4000-8000-000000000001";
+    const input = { email: "idempotent-invite@example.com", role: "member" };
+    const first = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token, key)).send(input);
+    const replay = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token, key)).send(input);
+    const mismatch = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token, key)).send({ ...input, role: "manager" });
+    const [operation] = await db.select().from(schema.idempotencyOperations).where(eq(schema.idempotencyOperations.key, key));
+    await db.update(schema.idempotencyOperations).set({ state: "processing", updatedAt: new Date() }).where(eq(schema.idempotencyOperations.id, operation.id));
+    const inProgress = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token, key)).send(input);
+    await db.update(schema.idempotencyOperations).set({ updatedAt: new Date(Date.now() - 6 * 60 * 1_000) }).where(eq(schema.idempotencyOperations.id, operation.id));
+    const recovered = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(idempotentAuth(fixture.admin.token, key)).send(input);
+    const invitations = await db.select().from(schema.workspaceInvitations).where(eq(schema.workspaceInvitations.email, input.email));
+    const events = (await db.select().from(schema.workspaceAuditEvents)).filter((event) => event.type === "member_invited" && event.details.email === input.email);
+
+    expect(first.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+    expect(mismatch.status).toBe(409);
+    expect(mismatch.body.error.code).toBe("idempotency_key_reused");
+    expect(operation.responsePayload).not.toContain(first.body.invitation.token);
+    expect(inProgress.status).toBe(409);
+    expect(inProgress.headers["retry-after"]).toBe("1");
+    expect(inProgress.body.error.code).toBe("idempotency_in_progress");
+    expect(recovered.status).toBe(201);
+    expect(recovered.body.delivery.status).toBe("failed");
+    expect(recovered.body.invitation).toEqual(first.body.invitation);
+    expect(invitations).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it("requires a UUID idempotency key for invitation and project creation", async () => {
+    const fixture = await createRoleFixture();
+    const missingInvitationKey = await request(app).post(`/api/workspaces/${fixture.workspaceId}/invitations`).set(auth(fixture.admin.token)).send({ email: "missing-key@example.com", role: "member" });
+    const malformedProjectKey = await request(app).post(`/api/workspaces/${fixture.workspaceId}/projects`).set({ ...auth(fixture.admin.token), "Idempotency-Key": "not-a-uuid" }).send({ name: "Missing key project" });
+
+    expect(missingInvitationKey.status).toBe(400);
+    expect(missingInvitationKey.body.error.code).toBe("invalid_idempotency_key");
+    expect(malformedProjectKey.status).toBe(400);
+    expect(malformedProjectKey.body.error.code).toBe("invalid_idempotency_key");
   });
 });

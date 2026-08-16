@@ -6,11 +6,17 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=@timesheet/web\" \"npm run dev --workspace=@timesheet/api\"",
+    "dev": "npm run dev:local",
+    "dev:local": "npm run db:local:up && npm run db:migrate:local && concurrently \"npm run dev:web\" \"npm run dev:api:local\"",
+    "dev:external": "concurrently \"npm run dev:web\" \"npm run dev:api\"",
     "dev:web": "npm run dev --workspace=@timesheet/web",
     "dev:api": "npm run dev --workspace=@timesheet/api",
+    "dev:api:local": "npm run dev:local --workspace=@timesheet/api",
+    "db:local:up": "docker compose up -d --wait postgres",
+    "db:local:down": "docker compose down",
     "db:generate": "npm run db:generate --workspace=@timesheet/api",
     "db:migrate": "npm run db:migrate --workspace=@timesheet/api",
+    "db:migrate:local": "npm run db:migrate:local --workspace=@timesheet/api",
     "test:api": "npm run test --workspace=@timesheet/api",
     "test:web": "npm run test --workspace=@timesheet/web",
     "build": "npm run build --workspace=@timesheet/web",
