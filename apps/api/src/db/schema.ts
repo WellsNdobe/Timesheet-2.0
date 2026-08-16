@@ -14,6 +14,7 @@ export const users = pgTable(
     email: text("email").notNull(),
     passwordHash: text("password_hash").notNull(),
     requiresPasswordChange: boolean("requires_password_change").notNull().default(false),
+    authVersion: integer("auth_version").notNull().default(0),
     isActive: boolean("is_active").notNull().default(true),
     lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -177,6 +178,23 @@ export const timesheetApprovalItems = pgTable(
   },
   (table) => [
     uniqueIndex("timesheet_approval_items_timesheet_project_unique").on(table.weeklyTimesheetId, table.projectId),
+  ],
+);
+
+export const passwordResetTokens = pgTable(
+  "password_reset_tokens",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: bigint("user_id", { mode: "number" }).notNull().references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("password_reset_tokens_token_hash_unique").on(table.tokenHash),
+    index("password_reset_tokens_user_created_index").on(table.userId, table.createdAt),
+    index("password_reset_tokens_expiry_index").on(table.expiresAt),
   ],
 );
 

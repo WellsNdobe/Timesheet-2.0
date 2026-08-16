@@ -9,6 +9,7 @@ import type { Express } from "express";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import * as schema from "../src/db/schema.js";
+import { hashPasswordResetToken } from "../src/auth/passwordResetTokens.js";
 
 const testDatabaseUrl = process.env.TEST_DATABASE_URL
   ?? "postgresql://postgres:postgres@localhost:5432/timesheet_test";
@@ -114,6 +115,7 @@ beforeEach(async () => {
   await db.delete(schema.workspaceMemberships);
   await db.delete(schema.workspaces);
   await db.delete(schema.authSessions);
+  await db.delete(schema.passwordResetTokens);
   await db.delete(schema.users);
 });
 
@@ -266,12 +268,22 @@ describe.sequential("email authentication", () => {
     const expired = await request(app)
       .get("/api/auth/me")
       .set("Authorization", `Bearer ${expiredToken}`);
+    const legacyToken = await new SignJWT({})
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(registration.body.user.id)
+      .setIssuer("tempoledger-api")
+      .setAudience("tempoledger-web")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(new TextEncoder().encode(jwtSecret));
+    const legacy = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${legacyToken}`);
 
     expect(currentUser.status).toBe(200);
     expect(currentUser.body.user.email).toBe("maia@example.com");
     expect(missing.status).toBe(401);
     expect(invalid.status).toBe(401);
     expect(expired.status).toBe(401);
+    expect(legacy.status).toBe(200);
   });
 
   it("rotates refresh tokens and rejects reuse of the revoked token", async () => {
@@ -299,6 +311,74 @@ describe.sequential("email authentication", () => {
 
     expect(logout.status).toBe(204);
     expect(refresh.status).toBe(401);
+  });
+
+  it("returns the same password-reset response without revealing account eligibility", async () => {
+    await register("active@example.com");
+    await register("inactive@example.com");
+    await db.update(schema.users).set({ isActive: false }).where(eq(schema.users.email, "inactive@example.com"));
+    await db.insert(schema.users).values({ email: "invited@example.com", passwordHash: "unusable", requiresPasswordChange: true });
+
+    const responses = await Promise.all(["active@example.com", "unknown@example.com", "inactive@example.com", "invited@example.com"].map((email) => request(app).post("/api/auth/password-reset/request").send({ email })));
+    expect(responses.map(({ status }) => status)).toEqual([202, 202, 202, 202]);
+    expect(responses.every(({ body }) => body.message === responses[0].body.message)).toBe(true);
+
+    const stored = await db.select().from(schema.passwordResetTokens);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].tokenHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(stored[0].usedAt).not.toBeNull();
+    const lifetime = stored[0].expiresAt.getTime() - stored[0].createdAt.getTime();
+    expect(lifetime).toBeGreaterThanOrEqual(30 * 60 * 1_000 - 1_000);
+    expect(lifetime).toBeLessThanOrEqual(30 * 60 * 1_000 + 1_000);
+  });
+
+  it("applies the per-account reset cooldown without changing the generic response", async () => {
+    await register("active@example.com");
+    const first = await request(app).post("/api/auth/password-reset/request").send({ email: "active@example.com" });
+    const second = await request(app).post("/api/auth/password-reset/request").send({ email: "active@example.com" });
+    expect(second.status).toBe(202);
+    expect(second.body).toEqual(first.body);
+    expect(await db.select().from(schema.passwordResetTokens)).toHaveLength(1);
+  });
+
+  it("validates only live unused password-reset tokens", async () => {
+    await register();
+    const [user] = await db.select().from(schema.users);
+    const liveToken = "live-password-reset-token-value-123";
+    const expiredToken = "expired-password-reset-token-value";
+    await db.insert(schema.passwordResetTokens).values([
+      { userId: user.id, tokenHash: hashPasswordResetToken(liveToken), expiresAt: new Date(Date.now() + 60_000) },
+      { userId: user.id, tokenHash: hashPasswordResetToken(expiredToken), expiresAt: new Date(Date.now() - 1_000) },
+    ]);
+
+    expect((await request(app).post("/api/auth/password-reset/validate").send({ token: liveToken })).body).toEqual({ valid: true });
+    expect((await request(app).post("/api/auth/password-reset/validate").send({ token: expiredToken })).body).toEqual({ valid: false });
+    expect((await request(app).post("/api/auth/password-reset/validate").send({ token: "unknown-password-reset-token-value" })).body).toEqual({ valid: false });
+  });
+
+  it("changes the password once, revokes refresh sessions, consumes other links, and rejects the old access token", async () => {
+    const registration = await register();
+    const oldAccessToken = registration.body.accessToken as string;
+    const oldRefreshCookie = cookieFrom(registration);
+    const [user] = await db.select().from(schema.users);
+    const resetToken = "valid-password-reset-token-value-123";
+    const otherToken = "other-password-reset-token-value-123";
+    await db.insert(schema.passwordResetTokens).values([
+      { userId: user.id, tokenHash: hashPasswordResetToken(resetToken), expiresAt: new Date(Date.now() + 60_000) },
+      { userId: user.id, tokenHash: hashPasswordResetToken(otherToken), expiresAt: new Date(Date.now() + 60_000) },
+    ]);
+
+    const completed = await request(app).post("/api/auth/password-reset/complete").send({ token: resetToken, password: "new-correct-horse-battery" });
+    expect(completed.status).toBe(204);
+    expect((await request(app).post("/api/auth/password-reset/complete").send({ token: resetToken, password: "another-correct-password" })).status).toBe(404);
+    expect((await request(app).post("/api/auth/login").send({ email: "maia@example.com", password: "correct-horse-battery" })).status).toBe(401);
+    expect((await request(app).post("/api/auth/login").send({ email: "maia@example.com", password: "new-correct-horse-battery" })).status).toBe(200);
+    expect((await request(app).get("/api/auth/me").set(auth(oldAccessToken))).status).toBe(401);
+    expect((await request(app).post("/api/auth/refresh").set("Cookie", oldRefreshCookie)).status).toBe(401);
+
+    const [updatedUser] = await db.select().from(schema.users).where(eq(schema.users.id, user.id));
+    expect(updatedUser.authVersion).toBe(1);
+    expect((await db.select().from(schema.passwordResetTokens)).every((token) => token.usedAt !== null)).toBe(true);
   });
 });
 

@@ -1,9 +1,10 @@
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull, sql } from "drizzle-orm";
 import { Router, type CookieOptions, type RequestHandler } from "express";
 import { z } from "zod";
 import { env } from "../config.js";
 import { db } from "../db/client.js";
-import { authSessions, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
+import { authSessions, passwordResetTokens, users, workspaceInvitations, workspaceMemberships, workspaces } from "../db/schema.js";
+import { sendPasswordReset } from "../email/sendPasswordReset.js";
 import { ApiError, asyncHandler } from "../errors.js";
 import { authenticate } from "./middleware.js";
 import { getDummyPasswordHash, hashPassword, verifyPassword } from "./passwords.js";
@@ -17,6 +18,7 @@ import {
 import { toPublicUser } from "./user.js";
 import { acceptInvitationForUser } from "../workspaces/routes.js";
 import { hashInvitationToken } from "../workspaces/invitations.js";
+import { createPasswordResetToken, getPasswordResetTokenExpiry, hashPasswordResetToken } from "./passwordResetTokens.js";
 
 const refreshCookieName = "refresh_token";
 
@@ -49,6 +51,11 @@ const invitationActivationSchema = z.object({
   token: invitationTokenSchema,
   password: z.string().min(8).max(128),
 }).strict();
+const passwordResetRequestSchema = z.object({ email: z.string().trim().toLowerCase().email().max(320) }).strict();
+const passwordResetTokenSchema = z.string().trim().min(20).max(512);
+const passwordResetValidateSchema = z.object({ token: passwordResetTokenSchema }).strict();
+const passwordResetCompleteSchema = passwordResetValidateSchema.extend({ password: z.string().min(8).max(128) }).strict();
+const passwordResetRequestMessage = "If an eligible account exists, a password reset email is on its way.";
 
 const refreshCookieOptions: CookieOptions = {
   httpOnly: true,
@@ -98,6 +105,7 @@ const authAttempts = new Map<string, { count: number; resetAt: number }>();
 
 const limiter: RequestHandler = (request, response, next) => {
   if (env.nodeEnv === "test") return next();
+  if (request.path === "/password-reset/request") return next();
 
   const now = Date.now();
   const key = request.get("cf-connecting-ip") ?? request.ip ?? "unknown";
@@ -121,6 +129,30 @@ const limiter: RequestHandler = (request, response, next) => {
   next();
 };
 
+const passwordResetLimit = 5;
+const passwordResetWindowMs = 15 * 60 * 1_000;
+const passwordResetAttempts = new Map<string, { count: number; resetAt: number }>();
+const passwordResetLimiter: RequestHandler = (request, response, next) => {
+  if (env.nodeEnv === "test") return next();
+
+  const now = Date.now();
+  const key = request.get("cf-connecting-ip") ?? request.ip ?? "unknown";
+  const previous = passwordResetAttempts.get(key);
+  const attempt = !previous || previous.resetAt <= now
+    ? { count: 1, resetAt: now + passwordResetWindowMs }
+    : { count: previous.count + 1, resetAt: previous.resetAt };
+  passwordResetAttempts.set(key, attempt);
+
+  response.setHeader("RateLimit-Limit", passwordResetLimit);
+  response.setHeader("RateLimit-Remaining", Math.max(0, passwordResetLimit - attempt.count));
+  response.setHeader("RateLimit-Reset", Math.ceil((attempt.resetAt - now) / 1_000));
+  if (attempt.count > passwordResetLimit) {
+    response.status(202).json({ message: passwordResetRequestMessage });
+    return;
+  }
+  next();
+};
+
 export const authRouter = Router();
 
 authRouter.use(limiter);
@@ -138,7 +170,7 @@ authRouter.post("/register", asyncHandler(async (request, response) => {
       const [user] = await transaction
         .insert(users)
         .values({ email: credentials.email, passwordHash })
-        .returning({ id: users.id, email: users.email, createdAt: users.createdAt });
+        .returning({ id: users.id, email: users.email, createdAt: users.createdAt, authVersion: users.authVersion });
 
       const [workspace] = await transaction.insert(workspaces).values({
         name: credentials.organizationName,
@@ -160,7 +192,7 @@ authRouter.post("/register", asyncHandler(async (request, response) => {
     setRefreshCookie(response, result.refreshToken);
     response.status(201).json({
       user: toPublicUser(result.user),
-      accessToken: await createAccessToken(result.user.id),
+      accessToken: await createAccessToken(result.user.id, result.user.authVersion),
     });
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -202,7 +234,122 @@ authRouter.post("/login", asyncHandler(async (request, response) => {
   });
 
   setRefreshCookie(response, refreshToken);
-  response.json({ user: toPublicUser(user), accessToken: await createAccessToken(user.id) });
+  response.json({ user: toPublicUser(user), accessToken: await createAccessToken(user.id, user.authVersion) });
+}));
+
+authRouter.post("/password-reset/request", passwordResetLimiter, asyncHandler(async (request, response) => {
+  const parsed = passwordResetRequestSchema.safeParse(request.body);
+  if (!parsed.success) throw new ApiError(400, "validation_error", "A valid email address is required.");
+
+  const [user] = await db.select({
+    id: users.id,
+    email: users.email,
+  }).from(users).where(and(
+    eq(users.email, parsed.data.email),
+    eq(users.isActive, true),
+    eq(users.requiresPasswordChange, false),
+  )).limit(1);
+
+  if (!user) {
+    response.status(202).json({ message: passwordResetRequestMessage });
+    return;
+  }
+
+  const resetRequest = await db.transaction(async (transaction) => {
+    await transaction.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`password-reset:${user.id}`}, 0))`);
+    const cooldownStartedAt = new Date(Date.now() - 60 * 1_000);
+    const [recentRequest] = await transaction.select({ id: passwordResetTokens.id })
+      .from(passwordResetTokens)
+      .where(and(eq(passwordResetTokens.userId, user.id), gt(passwordResetTokens.createdAt, cooldownStartedAt)))
+      .limit(1);
+    if (recentRequest) return null;
+
+    const token = createPasswordResetToken();
+    const expiresAt = getPasswordResetTokenExpiry();
+    const [storedToken] = await transaction.insert(passwordResetTokens).values({
+      userId: user.id,
+      tokenHash: hashPasswordResetToken(token),
+      expiresAt,
+    }).returning({ id: passwordResetTokens.id });
+    return { token, expiresAt, storedToken };
+  });
+  if (!resetRequest) {
+    response.status(202).json({ message: passwordResetRequestMessage });
+    return;
+  }
+
+  const resetUrl = new URL("/reset-password", env.webOrigin);
+  resetUrl.searchParams.set("token", resetRequest.token);
+  try {
+    const delivery = await sendPasswordReset({ recipientEmail: user.email, resetUrl: resetUrl.toString(), expiresAt: resetRequest.expiresAt });
+    if (delivery.status !== "sent") {
+      await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(eq(passwordResetTokens.id, resetRequest.storedToken.id));
+    }
+  } catch (error) {
+    await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(eq(passwordResetTokens.id, resetRequest.storedToken.id));
+    console.error("Password reset email delivery failed", { error: error instanceof Error ? error.name : "UnknownError" });
+  }
+
+  response.status(202).json({ message: passwordResetRequestMessage });
+}));
+
+authRouter.post("/password-reset/validate", asyncHandler(async (request, response) => {
+  const parsed = passwordResetValidateSchema.safeParse(request.body);
+  if (!parsed.success) {
+    response.json({ valid: false });
+    return;
+  }
+  const now = new Date();
+  const [token] = await db.select({ id: passwordResetTokens.id }).from(passwordResetTokens)
+    .innerJoin(users, eq(passwordResetTokens.userId, users.id))
+    .where(and(
+      eq(passwordResetTokens.tokenHash, hashPasswordResetToken(parsed.data.token)),
+      isNull(passwordResetTokens.usedAt),
+      gt(passwordResetTokens.expiresAt, now),
+      eq(users.isActive, true),
+      eq(users.requiresPasswordChange, false),
+    )).limit(1);
+  response.json({ valid: Boolean(token) });
+}));
+
+authRouter.post("/password-reset/complete", asyncHandler(async (request, response) => {
+  const parsed = passwordResetCompleteSchema.safeParse(request.body);
+  if (!parsed.success) throw new ApiError(400, "validation_error", "A valid reset link and a password of 8 to 128 characters are required.");
+  const passwordHash = await hashPassword(parsed.data.password);
+  const now = new Date();
+
+  await db.transaction(async (transaction) => {
+    const [consumedToken] = await transaction.update(passwordResetTokens).set({ usedAt: now }).where(and(
+      eq(passwordResetTokens.tokenHash, hashPasswordResetToken(parsed.data.token)),
+      isNull(passwordResetTokens.usedAt),
+      gt(passwordResetTokens.expiresAt, now),
+    )).returning({ userId: passwordResetTokens.userId });
+    if (!consumedToken) throw new ApiError(404, "password_reset_invalid", "This password reset link is invalid, expired, or has already been used.");
+
+    const [user] = await transaction.select({ id: users.id }).from(users).where(and(
+      eq(users.id, consumedToken.userId),
+      eq(users.isActive, true),
+      eq(users.requiresPasswordChange, false),
+    )).limit(1);
+    if (!user) throw new ApiError(404, "password_reset_invalid", "This password reset link is invalid, expired, or has already been used.");
+
+    await transaction.update(users).set({
+      passwordHash,
+      authVersion: sql`${users.authVersion} + 1`,
+      updatedAt: now,
+    }).where(eq(users.id, user.id));
+    await transaction.update(passwordResetTokens).set({ usedAt: now }).where(and(
+      eq(passwordResetTokens.userId, user.id),
+      isNull(passwordResetTokens.usedAt),
+    ));
+    await transaction.update(authSessions).set({ revokedAt: now }).where(and(
+      eq(authSessions.userId, user.id),
+      isNull(authSessions.revokedAt),
+    ));
+  });
+
+  clearRefreshCookie(response);
+  response.status(204).send();
 }));
 
 authRouter.get("/invitations/:token", asyncHandler(async (request, response) => {
@@ -252,7 +399,7 @@ authRouter.post("/invitations/activate", asyncHandler(async (request, response) 
     return user;
   });
   setRefreshCookie(response, refreshToken);
-  response.json({ user: toPublicUser(result), accessToken: await createAccessToken(result.id) });
+  response.json({ user: toPublicUser(result), accessToken: await createAccessToken(result.id, result.authVersion) });
 }));
 
 authRouter.post("/refresh", asyncHandler(async (request, response) => {
@@ -280,7 +427,7 @@ authRouter.post("/refresh", asyncHandler(async (request, response) => {
     }
 
     const [user] = await transaction
-      .select({ id: users.id, email: users.email, createdAt: users.createdAt })
+      .select({ id: users.id, email: users.email, createdAt: users.createdAt, authVersion: users.authVersion })
       .from(users)
       .where(and(eq(users.id, session.userId), eq(users.isActive, true)))
       .limit(1);
@@ -304,7 +451,7 @@ authRouter.post("/refresh", asyncHandler(async (request, response) => {
   }
 
   setRefreshCookie(response, nextToken);
-  response.json({ accessToken: await createAccessToken(result.id) });
+  response.json({ accessToken: await createAccessToken(result.id, result.authVersion) });
 }));
 
 authRouter.post("/logout", asyncHandler(async (request, response) => {

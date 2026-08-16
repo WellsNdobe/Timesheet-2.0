@@ -13,14 +13,14 @@ export const authenticate = asyncHandler(async (request, response, next) => {
   }
 
   try {
-    const userId = await verifyAccessToken(authorization.slice("Bearer ".length));
+    const claims = await verifyAccessToken(authorization.slice("Bearer ".length));
     const [user] = await db
-      .select({ id: users.id, email: users.email, createdAt: users.createdAt })
+      .select({ id: users.id, email: users.email, createdAt: users.createdAt, authVersion: users.authVersion })
       .from(users)
-      .where(and(eq(users.id, userId), eq(users.isActive, true)))
+      .where(and(eq(users.id, claims.userId), eq(users.isActive, true)))
       .limit(1);
 
-    if (!user) {
+    if (!user || user.authVersion !== claims.authVersion) {
       throw new ApiError(401, "auth_required", "Authentication is required.");
     }
 

@@ -10,7 +10,7 @@ export const refreshTokenTtlMs = 30 * 24 * 60 * 60 * 1_000;
 
 const signingKey = new TextEncoder().encode(env.jwtAccessSecret);
 
-export const createAccessToken = (userId: number) => new SignJWT({})
+export const createAccessToken = (userId: number, authVersion: number) => new SignJWT({ auth_version: authVersion })
   .setProtectedHeader({ alg: "HS256" })
   .setSubject(String(userId))
   .setIssuer(issuer)
@@ -27,7 +27,12 @@ export const verifyAccessToken = async (token: string) => {
     throw new Error("Invalid access token subject");
   }
 
-  return userId;
+  const authVersion = payload.auth_version === undefined ? 0 : Number(payload.auth_version);
+  if (!Number.isSafeInteger(authVersion) || authVersion < 0) {
+    throw new Error("Invalid access token auth version");
+  }
+
+  return { userId, authVersion };
 };
 
 export const createRefreshToken = () => randomBytes(32).toString("base64url");

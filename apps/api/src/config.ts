@@ -14,6 +14,8 @@ const environmentSchema = z.object({
   WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
   EMAIL_PROVIDER: z.enum(["disabled", "cloudflare"]).default("disabled"),
   EMAIL_FROM_ADDRESS: optionalEmail,
+  EMAIL_PASSWORD_RESET_FROM_ADDRESS: optionalEmail,
+  EMAIL_PASSWORD_RESET_REPLY_TO: optionalEmail,
   EMAIL_FROM_NAME: z.string().trim().min(1).max(100).default("TempoLedger"),
   EMAIL_REPLY_TO: optionalEmail,
 });
@@ -28,6 +30,10 @@ if (parsedEnvironment.EMAIL_PROVIDER === "cloudflare" && !parsedEnvironment.EMAI
   throw new Error("EMAIL_FROM_ADDRESS is required when EMAIL_PROVIDER=cloudflare");
 }
 
+if (parsedEnvironment.EMAIL_PROVIDER === "cloudflare" && !parsedEnvironment.EMAIL_PASSWORD_RESET_FROM_ADDRESS) {
+  throw new Error("EMAIL_PASSWORD_RESET_FROM_ADDRESS is required when EMAIL_PROVIDER=cloudflare");
+}
+
 export const env = {
   nodeEnv: parsedEnvironment.NODE_ENV,
   port: parsedEnvironment.API_PORT,
@@ -37,6 +43,8 @@ export const env = {
   email: {
     provider: parsedEnvironment.EMAIL_PROVIDER,
     fromAddress: parsedEnvironment.EMAIL_FROM_ADDRESS,
+    passwordResetFromAddress: parsedEnvironment.EMAIL_PASSWORD_RESET_FROM_ADDRESS,
+    passwordResetReplyTo: parsedEnvironment.EMAIL_PASSWORD_RESET_REPLY_TO,
     fromName: parsedEnvironment.EMAIL_FROM_NAME,
     replyTo: parsedEnvironment.EMAIL_REPLY_TO,
   },

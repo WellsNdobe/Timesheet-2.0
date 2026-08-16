@@ -86,3 +86,61 @@ describe("workspace signup onboarding", () => {
     expect(screen.getByRole("button", { name: "Create workspace" })).toBeEnabled();
   });
 });
+
+describe("password recovery", () => {
+  it("validates the email and shows the same inbox confirmation", async () => {
+    window.history.replaceState({}, "", "/forgot-password");
+    let requestBody: unknown;
+    server.use(http.post("/api/auth/password-reset/request", async ({ request }) => { requestBody = await request.json(); return HttpResponse.json({ message: "If an eligible account exists, a password reset email is on its way." }, { status: 202 }); }));
+    const user = userEvent.setup();
+    render(<AuthExperience mode="forgot-password" onAuthenticated={() => undefined} />);
+
+    await user.click(screen.getByRole("button", { name: "Send reset link" }));
+    expect(screen.getByText("Enter a valid email address.")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Account email"), "maia@example.com");
+    await user.click(screen.getByRole("button", { name: "Send reset link" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Check your inbox");
+    expect(screen.getByText(/Try again after one minute/)).toBeInTheDocument();
+    expect(requestBody).toEqual({ email: "maia@example.com" });
+    expect(screen.queryByLabelText("Organization name")).not.toBeInTheDocument();
+  });
+
+  it("shows recovery for an expired or used link", async () => {
+    window.history.replaceState({}, "", "/reset-password?token=expired-password-reset-token-value");
+    server.use(http.post("/api/auth/password-reset/validate", () => HttpResponse.json({ valid: false })));
+    render(<AuthExperience mode="reset-password" onAuthenticated={() => undefined} />);
+    expect(await screen.findByText("This reset link is unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Request a new link" })).toHaveAttribute("href", "/forgot-password");
+  });
+
+  it("checks confirmation, completes the reset, and removes the token from browser history", async () => {
+    window.history.replaceState({}, "", "/reset-password?token=valid-password-reset-token-value");
+    let requestBody: unknown;
+    server.use(
+      http.post("/api/auth/password-reset/validate", () => HttpResponse.json({ valid: true })),
+      http.post("/api/auth/password-reset/complete", async ({ request }) => { requestBody = await request.json(); return new HttpResponse(null, { status: 204 }); }),
+    );
+    const user = userEvent.setup();
+    render(<AuthExperience mode="reset-password" onAuthenticated={() => undefined} />);
+    expect(await screen.findByRole("button", { name: "Change password" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("New password"), "new-correct-horse-battery");
+    await user.type(screen.getByLabelText("Confirm new password"), "different-password");
+    await user.click(screen.getByRole("button", { name: "Change password" }));
+    expect(screen.getByText("The passwords do not match.")).toBeInTheDocument();
+    await user.clear(screen.getByLabelText("Confirm new password"));
+    await user.type(screen.getByLabelText("Confirm new password"), "new-correct-horse-battery");
+    await user.click(screen.getByRole("button", { name: "Change password" }));
+
+    expect(await screen.findByText("Password changed")).toBeInTheDocument();
+    expect(requestBody).toEqual({ token: "valid-password-reset-token-value", password: "new-correct-horse-battery" });
+    expect(window.location.search).toBe("");
+    expect(screen.getByRole("link", { name: "Log in with your new password" })).toHaveAttribute("href", "/login?passwordReset=success");
+  });
+
+  it("shows the password-changed notice on login", () => {
+    window.history.replaceState({}, "", "/login?passwordReset=success");
+    render(<AuthExperience mode="login" onAuthenticated={() => undefined} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Password changed—log in with your new password.");
+  });
+});
