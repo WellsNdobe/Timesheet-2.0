@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  createTimeEntry, deleteTimeEntry, loadProjects, loadTimeEntries, loadWeekStatus,
-  submitTimesheet, updateTimeEntry, type Project, type TimeEntry, type TimeEntryWeek, type WeekStatus,
+  createTimeEntry, deleteTimeEntry, loadProjects, loadTimeEntries, loadWeekStatus, loadWeekCompleteness,
+  submitTimesheet, updateTimeEntry, type Project, type TimeEntry, type TimeEntryWeek, type WeekStatus, type WeekCompleteness,
 } from "../api/client";
 import { Icon } from "../components/Icon";
 import type { WorkspaceSummary } from "../types/workspace";
@@ -26,7 +26,7 @@ const parseInputDuration = (input: string): ParsedDuration => {
 
 const statusLabel = (value: string) => value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase());
 const weekDays = (weekStart: string) => Array.from({ length: 7 }, (_, index) => {
-  const date = new Date(`${weekStart}T00:00:00`);
+  const date = new Date(`${weekStart}T00:00:00.000Z`);
   date.setDate(date.getDate() + index);
   return { date: date.toISOString().slice(0, 10), label: date.toLocaleDateString(undefined, { weekday: "short", day: "numeric" }) };
 });
@@ -57,6 +57,7 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
 
   const [week, setWeek] = useState<TimeEntryWeek | null>(null);
   const [review, setReview] = useState<WeekStatus | null>(null);
+  const [completeness, setCompleteness] = useState<WeekCompleteness | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [localRows, setLocalRows] = useState<InlineRow[]>([]);
   const [cellEdits, setCellEdits] = useState<Record<string, CellEdit>>({});
@@ -69,14 +70,16 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [entries, status, projectRows] = await Promise.all([
+      const [entries, status, projectRows, completenessResult] = await Promise.all([
         loadTimeEntries(workspace.id, weekStart, accessToken),
         loadWeekStatus(workspace.id, weekStart, accessToken),
         loadProjects(workspace.id, accessToken),
+        loadWeekCompleteness(workspace.id, weekStart, accessToken),
       ]);
       setWeek(entries);
       setReview(status);
       setProjects(projectRows);
+      setCompleteness(completenessResult);
       setMessage("");
     } catch {
       setMessage("This week could not be loaded. Try again.");
@@ -86,6 +89,10 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
   }, [accessToken, weekStart, workspace.id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const refreshCompleteness = async () => {
+    try { setCompleteness(await loadWeekCompleteness(workspace.id, weekStart, accessToken)); } catch { /* The entry save remains successful even if the advisory summary is temporarily unavailable. */ }
+  };
 
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const editableProjectIds = new Set(review?.portions.filter((portion) => portion.editable).map((portion) => portion.project.id) ?? []);
@@ -167,6 +174,7 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
           removeServerEntry(existing.id);
         }
         setCellEdit(cellKey, null);
+        await refreshCompleteness();
         return;
       }
 
@@ -186,6 +194,7 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
         updateLocalRow(row.key, (item) => ({ ...item, draft: false, entries: { ...item.entries, [date]: response.entry } }));
       }
       setCellEdit(cellKey, null);
+      await refreshCompleteness();
     } catch (error) {
       setCellEdit(cellKey, {
         value: parsed.normalized,
@@ -209,6 +218,7 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
         setWeek((current) => current ? { ...current, entries: current.entries.filter((entry) => !entryIds.has(entry.id)) } : current);
       }
       setMessage("");
+      await refreshCompleteness();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The row could not be deleted.");
     } finally {
@@ -250,6 +260,11 @@ export function TimesheetPage({ workspace, accessToken }: { workspace: Workspace
       <div className="timesheet-summary__meta"><span>Review state</span><b>{statusLabel(review?.status ?? "draft")}</b></div>
       {(draftWeek || editableProjectIds.size > 0) && <button className="subtle-button" disabled={saving || hasCellSaving || weeklyTotal === 0} onClick={() => void submit()}>{editableProjectIds.size > 0 ? "Resubmit returned work" : "Submit timesheet"} <Icon name="arrow" size={13} /></button>}
     </section>
+
+    {completeness && <section className={`panel completeness-card ${completeness.readyToSubmit ? "completeness-card--ready" : ""}`} aria-label="Weekly completeness">
+      <div><p className="section-kicker">SUBMISSION CHECK</p><h2>{completeness.readyToSubmit ? "Your week looks complete" : "Check your week before submitting"}</h2><p>{formatMinutes(completeness.loggedMinutes)} logged against {formatMinutes(completeness.expectedMinutes)} expected{completeness.exceptionMinutes > 0 ? ` after ${formatMinutes(completeness.exceptionMinutes)} of approved exceptions` : ""}.</p></div>
+      {!completeness.readyToSubmit && <div className="completeness-card__warning"><strong>{formatMinutes(completeness.remainingMinutes)} still unaccounted for</strong><span>{completeness.missingWorkingDays.map((day) => new Date(`${day.workDate}T00:00:00`).toLocaleDateString(undefined, { weekday: "short", day: "numeric" })).join(", ")}</span><small>You can still submit; this is a confidence check only.</small></div>}
+    </section>}
 
     {review && review.portions.length > 0 && <section className="portion-status-grid">{review.portions.map((portion) => <article className="panel portion-status-card" key={portion.approvalItemId}>
       <div><strong>{portion.project.name}</strong><span>Revision {portion.revisionNumber} · {formatMinutes(portion.submittedMinutes)}</span></div>

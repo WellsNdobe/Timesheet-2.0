@@ -27,7 +27,7 @@ describe("member governance", () => {
     render(<MembersPage workspace={adminWorkspace} accessToken="token" onNavigate={() => {}} />);
 
     const row = (await screen.findByText("manager@example.com")).closest("tr")!;
-    expect(within(row).getByText("2 · transfer first")).toBeInTheDocument();
+    expect(within(row).getByText("2 · transfer in Approvals")).toBeInTheDocument();
     await user.click(within(row).getByRole("button", { name: "Deactivate" }));
     expect(await screen.findByText("manager@example.com has 2 pending approval(s). Transfer them before changing access.")).toBeInTheDocument();
   });

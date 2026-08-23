@@ -7,6 +7,9 @@ import { errorHandler, notFoundHandler } from "./errors.js";
 import { timesheetRouter } from "./timesheets/routes.js";
 import { workspaceRouter } from "./workspaces/routes.js";
 import { workflowRouter } from "./workflow/routes.js";
+import { reportsRouter } from "./reports/routes.js";
+import { reportExportRouter } from "./reports/exportRoutes.js";
+import { completenessRouter } from "./completeness/routes.js";
 import { withRequestDatabase } from "./db/client.js";
 
 type AppOptions = { databaseConnectionString?: string | (() => string) };
@@ -45,6 +48,9 @@ export const createApp = (options: AppOptions = {}) => {
   app.use("/api/workspaces", workspaceRouter);
   app.use("/api", timesheetRouter);
   app.use("/api", workflowRouter);
+  app.use("/api", reportsRouter);
+  app.use("/api", reportExportRouter);
+  app.use("/api", completenessRouter);
   app.use(notFoundHandler);
   app.use(errorHandler);
   return app;

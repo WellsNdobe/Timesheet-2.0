@@ -6,6 +6,7 @@ import { MembersPage } from "../pages/MembersPage";
 import { OverviewPage } from "../pages/OverviewPage";
 import { PlaceholderPage } from "../pages/PlaceholderPage";
 import { ProjectsPage } from "../pages/ProjectsPage";
+import { ReportsPage } from "../pages/ReportsPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TimesheetPage } from "../pages/TimesheetPage";
 import type { PageKey } from "../types/navigation";
@@ -34,12 +35,13 @@ export function Dashboard({ accessToken, userEmail, path, onNavigate }: { access
   return <DashboardLayout activePage={activePage} onSelectPage={(page) => onNavigate(paths[page])} onNavigate={onNavigate} accessToken={accessToken} workspace={readyState.workspace} pendingApprovalCount={readyState.pendingCount} userEmail={userEmail}>{(onLogTime) => {
     if (unknownPath) return <AccessStatePage title="Page not found" message="The requested page does not exist in this workspace." />;
     if (forbidden) return <AccessStatePage title="Access denied" message="Your workspace role does not allow access to this page." />;
-    if (activePage === "Overview") return <OverviewPage onLogTime={onLogTime} />;
+    if (activePage === "Overview") return <OverviewPage workspace={readyState.workspace} accessToken={accessToken} onLogTime={onLogTime} />;
     if (activePage === "Time entries") return <TimesheetPage workspace={readyState.workspace} accessToken={accessToken} />;
     if (activePage === "Approvals") return <ApprovalsPage workspace={readyState.workspace} accessToken={accessToken} approvalId={approvalMatch?.[1]} onNavigate={onNavigate} onPendingCountChange={updatePendingCount} />;
     if (activePage === "Members") return <MembersPage workspace={readyState.workspace} accessToken={accessToken} onNavigate={onNavigate} />;
     if (activePage === "Projects") return <ProjectsPage workspace={readyState.workspace} accessToken={accessToken} />;
-    if (activePage === "Settings") return <SettingsPage />;
+    if (activePage === "Reports") return <ReportsPage workspace={readyState.workspace} accessToken={accessToken} />;
+    if (activePage === "Settings") return <SettingsPage workspace={readyState.workspace} accessToken={accessToken} />;
     return <PlaceholderPage page={activePage} />;
   }}</DashboardLayout>;
 }

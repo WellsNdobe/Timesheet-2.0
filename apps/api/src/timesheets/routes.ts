@@ -4,7 +4,7 @@ import { z } from "zod";
 import { authenticate } from "../auth/middleware.js";
 import { db } from "../db/client.js";
 import {
-  idempotencyOperations, projects, tasks, timeEntries, timesheetApprovalItems, timesheetApprovalRevisions,
+  clients, idempotencyOperations, projects, tasks, timeEntries, timesheetApprovalItems, timesheetApprovalRevisions,
   timesheetReviewEntrySnapshots, timesheetReviewEvents, weeklyTimesheets,
   users, workspaceMemberships, workspaces,
 } from "../db/schema.js";
@@ -23,7 +23,18 @@ const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }, "A real calendar date is required.");
 const weekSchema = dateSchema.refine((value) => new Date(`${value}T00:00:00.000Z`).getUTCDay() === 1, "weekStart must be a Monday.");
-const projectSchema = z.object({ name: z.string().trim().min(1).max(160), approverMembershipId: idSchema.nullable().optional() }).strict();
+const currencySchema = z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/, "Use a three-letter currency code.");
+const commercialProjectSchema = z.object({
+  clientId: idSchema.nullable().optional(),
+  hourlyRateCents: z.number().int().min(0).max(100_000_000).nullable().optional(),
+  rateCurrency: currencySchema.nullable().optional(),
+  budgetHours: z.number().positive().max(1_000_000).nullable().optional(),
+  budgetCents: z.number().int().min(0).max(2_000_000_000).nullable().optional(),
+  budgetCurrency: currencySchema.nullable().optional(),
+}).refine((value) => (value.hourlyRateCents === undefined && value.rateCurrency === undefined) || (value.hourlyRateCents == null) === (value.rateCurrency == null), "A rate requires both an amount and currency.")
+  .refine((value) => (value.budgetCents === undefined && value.budgetCurrency === undefined) || (value.budgetCents == null) === (value.budgetCurrency == null), "A currency budget requires both an amount and currency.");
+const projectSchema = z.object({ name: z.string().trim().min(1).max(160), approverMembershipId: idSchema.nullable().optional() }).merge(commercialProjectSchema).strict();
+const clientSchema = z.object({ name: z.string().trim().min(1).max(160) }).strict();
 const taskSchema = z.object({ name: z.string().trim().min(1).max(160) }).strict();
 const entryBaseSchema = z.object({
   projectId: idSchema, taskId: idSchema.nullable().optional(), workDate: dateSchema,
@@ -63,7 +74,22 @@ const dateInZone = (value: string, timezone: string) => {
 const lockWorkspaceGovernance = (transaction: DbTransaction, workspaceId: number) => transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId})`);
 const lockMemberEntries = (transaction: DbTransaction, workspaceId: number, membershipId: number) => transaction.execute(sql`select pg_advisory_xact_lock(${workspaceId}, ${membershipId})`);
 const publicEntry = (entry: typeof timeEntries.$inferSelect) => ({ ...entry, id: String(entry.id), workspaceId: String(entry.workspaceId), membershipId: String(entry.membershipId), projectId: String(entry.projectId), taskId: entry.taskId == null ? null : String(entry.taskId), startedAt: entry.startedAt?.toISOString() ?? null, endedAt: entry.endedAt?.toISOString() ?? null, createdAt: entry.createdAt.toISOString(), updatedAt: entry.updatedAt.toISOString() });
-const publicProject = (project: ProjectRow) => ({ ...project, id: String(project.id), workspaceId: String(project.workspaceId), approverMembershipId: project.approverMembershipId == null ? null : String(project.approverMembershipId), createdAt: project.createdAt.toISOString(), updatedAt: project.updatedAt.toISOString() });
+const publicClient = (client: typeof clients.$inferSelect) => ({ id: String(client.id), workspaceId: String(client.workspaceId), name: client.name, isArchived: client.isArchived, createdAt: client.createdAt.toISOString(), updatedAt: client.updatedAt.toISOString() });
+const publicProject = (project: ProjectRow, options?: { client?: typeof clients.$inferSelect | null; role?: WorkspaceMembership["role"]; usedMinutes?: number; billableMinutes?: number }) => {
+  const usedMinutes = options?.usedMinutes ?? 0;
+  const billableMinutes = options?.billableMinutes ?? 0;
+  const moneyUsedCents = project.hourlyRateCents == null ? null : Math.round(billableMinutes * project.hourlyRateCents / 60);
+  const budgetProgress = {
+    hoursPercent: project.budgetMinutes == null ? null : Math.round((usedMinutes / project.budgetMinutes) * 10_000) / 100,
+    moneyPercent: project.budgetCents == null || moneyUsedCents == null ? null : Math.round((moneyUsedCents / project.budgetCents) * 10_000) / 100,
+    attention: (project.budgetMinutes != null && usedMinutes >= project.budgetMinutes) || (project.budgetCents != null && moneyUsedCents != null && moneyUsedCents >= project.budgetCents) ? "over" : (project.budgetMinutes != null && usedMinutes / project.budgetMinutes >= .8) || (project.budgetCents != null && moneyUsedCents != null && moneyUsedCents / project.budgetCents >= .8) ? "attention" : "on_track",
+  } as const;
+  const base = { id: String(project.id), workspaceId: String(project.workspaceId), name: project.name, clientId: project.clientId == null ? null : String(project.clientId), client: options?.client ? publicClient(options.client) : null, approverMembershipId: project.approverMembershipId == null ? null : String(project.approverMembershipId), isArchived: project.isArchived, createdAt: project.createdAt.toISOString(), updatedAt: project.updatedAt.toISOString() };
+  if (options?.role === "member") return base;
+  const managerBase = { ...base, budgetProgress };
+  if (options?.role !== "admin") return managerBase;
+  return { ...managerBase, commercial: { hourlyRateCents: project.hourlyRateCents, rateCurrency: project.rateCurrency, budgetHours: project.budgetMinutes == null ? null : project.budgetMinutes / 60, budgetCents: project.budgetCents, budgetCurrency: project.budgetCurrency, usedHours: usedMinutes / 60, billableHours: billableMinutes / 60, billableValueCents: moneyUsedCents } };
+};
 const memberIdentities = async (transaction: DbTransaction, workspaceId: number, membershipIds: number[]) => {
   if (!membershipIds.length) return new Map<number, { id: string; email: string; role: string; isActive: boolean }>();
   const rows = await transaction.select({ membership: workspaceMemberships, user: users }).from(workspaceMemberships).innerJoin(users, eq(workspaceMemberships.userId, users.id)).where(and(eq(workspaceMemberships.workspaceId, workspaceId), inArray(workspaceMemberships.id, [...new Set(membershipIds)])));
@@ -101,6 +127,27 @@ const validateEntryReferences = async (transaction: DbTransaction, workspaceId: 
   const project = await requireProject(transaction, workspaceId, projectId, allowArchived);
   if (taskId != null) await requireTask(transaction, projectId, taskId, allowArchived);
   return project;
+};
+
+const requireClient = async (transaction: DbTransaction, workspaceId: number, clientId: number, allowArchived = false) => {
+  const [client] = await transaction.select().from(clients).where(and(eq(clients.id, clientId), eq(clients.workspaceId, workspaceId))).limit(1);
+  if (!client) throw notFound();
+  if (!allowArchived && client.isArchived) throw new ApiError(400, "invalid_client", "The selected client is not available.");
+  return client;
+};
+
+const commercialProjectValues = (input: z.infer<typeof commercialProjectSchema>) => ({
+  ...(input.clientId === undefined ? {} : { clientId: input.clientId }),
+  ...(input.hourlyRateCents === undefined ? {} : { hourlyRateCents: input.hourlyRateCents, rateCurrency: input.rateCurrency ?? null }),
+  ...(input.budgetHours === undefined ? {} : { budgetMinutes: input.budgetHours == null ? null : Math.round(input.budgetHours * 60) }),
+  ...(input.budgetCents === undefined ? {} : { budgetCents: input.budgetCents, budgetCurrency: input.budgetCurrency ?? null }),
+});
+
+const projectUsage = async (workspaceId: number, projectIds: number[]) => {
+  if (!projectIds.length) return new Map<number, { usedMinutes: number; billableMinutes: number }>();
+  const rows = await db.select({ projectId: timeEntries.projectId, usedMinutes: sql<number>`coalesce(sum(${timeEntries.durationMinutes}), 0)::int`, billableMinutes: sql<number>`coalesce(sum(case when ${timeEntries.isBillable} then ${timeEntries.durationMinutes} else 0 end), 0)::int` })
+    .from(timeEntries).where(and(eq(timeEntries.workspaceId, workspaceId), inArray(timeEntries.projectId, projectIds))).groupBy(timeEntries.projectId);
+  return new Map(rows.map((row) => [row.projectId, { usedMinutes: Number(row.usedMinutes), billableMinutes: Number(row.billableMinutes) }]));
 };
 
 const latestRevisionRows = async (transaction: DbTransaction, itemIds: number[]) => {
@@ -147,11 +194,48 @@ const updateSheetStatus = async (transaction: DbTransaction, sheetId: number) =>
 export const timesheetRouter = Router();
 timesheetRouter.use(authenticate);
 
+timesheetRouter.get("/workspaces/:workspaceId/clients", asyncHandler(async (request, response) => {
+  const workspaceId = paramId(request.params.workspaceId); const actor = await requireWorkspaceMembership(response, workspaceId);
+  requireManagerOrAdmin(actor);
+  const rows = await db.select().from(clients).where(and(eq(clients.workspaceId, workspaceId), ...(request.query.includeArchived === "true" ? [] : [eq(clients.isArchived, false)]))).orderBy(asc(clients.name));
+  response.json({ clients: rows.map(publicClient) });
+}));
+
+timesheetRouter.post("/workspaces/:workspaceId/clients", asyncHandler(async (request, response) => {
+  const workspaceId = paramId(request.params.workspaceId); const userId = Number(response.locals.authUser.id); const input = parse(clientSchema, request.body);
+  const client = await db.transaction(async (transaction) => {
+    await lockWorkspaceGovernance(transaction, workspaceId); const actor = await membershipInTransaction(transaction, workspaceId, userId); requireAdmin(actor);
+    const [created] = await transaction.insert(clients).values({ workspaceId, name: input.name }).returning();
+    await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: "client_created", details: { clientId: String(created.id), name: created.name } });
+    return created;
+  });
+  response.status(201).json({ client: publicClient(client) });
+}));
+
+timesheetRouter.patch("/workspaces/:workspaceId/clients/:clientId", asyncHandler(async (request, response) => {
+  const workspaceId = paramId(request.params.workspaceId); const clientId = paramId(request.params.clientId); const userId = Number(response.locals.authUser.id); const input = parse(clientSchema.partial().extend({ isArchived: z.boolean().optional() }).strict(), request.body);
+  const client = await db.transaction(async (transaction) => {
+    await lockWorkspaceGovernance(transaction, workspaceId); const actor = await membershipInTransaction(transaction, workspaceId, userId); requireAdmin(actor);
+    const existing = await requireClient(transaction, workspaceId, clientId, true);
+    if (input.isArchived === true) {
+      const [activeProject] = await transaction.select({ id: projects.id }).from(projects).where(and(eq(projects.workspaceId, workspaceId), eq(projects.clientId, clientId), eq(projects.isArchived, false))).limit(1);
+      if (activeProject) throw new ApiError(409, "client_has_active_projects", "Move or archive active projects before archiving this client.");
+    }
+    const [updated] = await transaction.update(clients).set({ ...input, updatedAt: new Date() }).where(eq(clients.id, existing.id)).returning();
+    if (!updated) throw notFound();
+    await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: input.isArchived !== undefined ? "client_access_changed" : "client_updated", details: { clientId: String(updated.id), name: updated.name, isArchived: updated.isArchived } });
+    return updated;
+  });
+  response.json({ client: publicClient(client) });
+}));
+
 timesheetRouter.get("/workspaces/:workspaceId/projects", asyncHandler(async (request, response) => {
-  const workspaceId = paramId(request.params.workspaceId); await requireWorkspaceMembership(response, workspaceId);
+  const workspaceId = paramId(request.params.workspaceId); const actor = await requireWorkspaceMembership(response, workspaceId);
   const rows = await db.select().from(projects).where(and(eq(projects.workspaceId, workspaceId), ...(request.query.includeArchived === "true" ? [] : [eq(projects.isArchived, false)]))).orderBy(asc(projects.name));
   const identities = await db.transaction((transaction) => memberIdentities(transaction, workspaceId, rows.flatMap((project) => project.approverMembershipId == null ? [] : [project.approverMembershipId])));
-  response.json({ projects: rows.map((project) => { const approver = project.approverMembershipId == null ? null : identities.get(project.approverMembershipId) ?? null; return { ...publicProject(project), approver, submissionReady: approver?.isActive === true && ["admin", "manager"].includes(approver.role) }; }) });
+  const clientRows = rows.some((project) => project.clientId != null) ? await db.select().from(clients).where(and(eq(clients.workspaceId, workspaceId), inArray(clients.id, rows.flatMap((project) => project.clientId == null ? [] : [project.clientId])))) : [];
+  const clientById = new Map(clientRows.map((client) => [client.id, client])); const usage = await projectUsage(workspaceId, rows.map((project) => project.id));
+  response.json({ projects: rows.map((project) => { const approver = project.approverMembershipId == null ? null : identities.get(project.approverMembershipId) ?? null; const total = usage.get(project.id); return { ...publicProject(project, { client: project.clientId == null ? null : clientById.get(project.clientId) ?? null, role: actor.role, ...total }), approver, submissionReady: approver?.isActive === true && ["admin", "manager"].includes(approver.role) }; }) });
 }));
 
 timesheetRouter.post("/workspaces/:workspaceId/projects", asyncHandler(async (request, response) => {
@@ -170,9 +254,10 @@ timesheetRouter.post("/workspaces/:workspaceId/projects", asyncHandler(async (re
       return decryptIdempotencyResponse<{ project: ReturnType<typeof publicProject> }>(existing.responsePayload);
     }
     if (input.approverMembershipId != null && !await eligibleApprover(transaction, workspaceId, input.approverMembershipId)) throw new ApiError(400, "invalid_approver", "Approver must be an active manager or admin in this workspace.");
-    const [created] = await transaction.insert(projects).values({ workspaceId, name: input.name, approverMembershipId: input.approverMembershipId ?? null }).returning();
+    if (input.clientId != null) await requireClient(transaction, workspaceId, input.clientId);
+    const [created] = await transaction.insert(projects).values({ workspaceId, name: input.name, approverMembershipId: input.approverMembershipId ?? null, ...commercialProjectValues(input) }).returning();
     await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: "project_created", targetProjectId: created.id, details: { name: created.name, approverMembershipId: created.approverMembershipId == null ? null : String(created.approverMembershipId) } });
-    const createdBody = { project: publicProject(created) };
+    const createdBody = { project: publicProject(created, { role: actor.role }) };
     await transaction.insert(idempotencyOperations).values({ workspaceId, actorMembershipId: actor.id, operation: "project_create", key: idempotencyKey, requestFingerprint, state: "completed", resourceId: created.id, responseStatus: 201, responsePayload: encryptIdempotencyResponse(createdBody), expiresAt: new Date(now.getTime() + idempotencyTtlMs) });
     return createdBody;
   });
@@ -183,14 +268,15 @@ timesheetRouter.patch("/workspaces/:workspaceId/projects/:projectId", asyncHandl
   const workspaceId = paramId(request.params.workspaceId); const projectId = paramId(request.params.projectId); const userId = Number(response.locals.authUser.id); const input = parse(projectSchema.partial().extend({ isArchived: z.boolean().optional() }).strict(), request.body);
   const project = await db.transaction(async (transaction) => {
     await lockWorkspaceGovernance(transaction, workspaceId); const actor = await membershipInTransaction(transaction, workspaceId, userId); const existing = await requireProject(transaction, workspaceId, projectId, true); requireAssignedProjectManager(actor, existing);
-    if (actor.role === "manager" && (input.approverMembershipId !== undefined || input.isArchived !== undefined)) throw insufficientPermissions();
+    if (actor.role === "manager" && (input.approverMembershipId !== undefined || input.isArchived !== undefined || input.clientId !== undefined || input.hourlyRateCents !== undefined || input.rateCurrency !== undefined || input.budgetHours !== undefined || input.budgetCents !== undefined || input.budgetCurrency !== undefined)) throw insufficientPermissions();
     if (input.isArchived === true) { const itemRows = await transaction.select({ id: timesheetApprovalItems.id }).from(timesheetApprovalItems).innerJoin(weeklyTimesheets, eq(timesheetApprovalItems.weeklyTimesheetId, weeklyTimesheets.id)).where(and(eq(timesheetApprovalItems.projectId, projectId), eq(weeklyTimesheets.workspaceId, workspaceId))); const latest = await latestRevisionRows(transaction, itemRows.map((item) => item.id)); if ([...latest.values()].some((revision) => revision.status === "pending" || revision.status === "changes_requested")) throw new ApiError(409, "project_has_unresolved_approvals", "Resolve or withdraw pending and returned approvals before archiving this project."); }
     if (input.approverMembershipId != null && !await eligibleApprover(transaction, workspaceId, input.approverMembershipId)) throw new ApiError(400, "invalid_approver", "Approver must be an active manager or admin in this workspace.");
-    const [updated] = await transaction.update(projects).set({ ...input, updatedAt: new Date() }).where(and(eq(projects.id, projectId), eq(projects.workspaceId, workspaceId))).returning(); if (!updated) throw notFound();
+    if (input.clientId != null) await requireClient(transaction, workspaceId, input.clientId);
+    const { budgetHours: _budgetHours, ...dbInput } = input; const [updated] = await transaction.update(projects).set({ ...dbInput, ...commercialProjectValues(input), updatedAt: new Date() }).where(and(eq(projects.id, projectId), eq(projects.workspaceId, workspaceId))).returning(); if (!updated) throw notFound();
     await audit(transaction, { workspaceId, actorMembershipId: actor.id, type: input.approverMembershipId !== undefined ? "project_approver_changed" : input.isArchived !== undefined ? "project_access_changed" : "project_updated", targetProjectId: projectId, details: { previousApproverMembershipId: existing.approverMembershipId == null ? null : String(existing.approverMembershipId), nextApproverMembershipId: updated.approverMembershipId == null ? null : String(updated.approverMembershipId), isArchived: updated.isArchived } });
     return updated;
   });
-  response.json({ project: publicProject(project) });
+  response.json({ project: publicProject(project, { role: "admin" }) });
 }));
 
 timesheetRouter.get("/workspaces/:workspaceId/projects/:projectId/tasks", asyncHandler(async (request, response) => {

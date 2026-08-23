@@ -37,6 +37,12 @@ const entry = (changes: Partial<{ id: string; projectId: string; workDate: strin
   isBillable: true,
 });
 
+const completeness = (loggedMinutes = 0) => ({
+  weekStart: "2025-03-10", expectedWeeklyMinutes: 2400, expectedMinutes: 2400, loggedMinutes,
+  exceptionMinutes: 0, remainingMinutes: Math.max(0, 2400 - loggedMinutes), readyToSubmit: loggedMinutes >= 2400,
+  missingWorkingDays: [], workingDays: [],
+});
+
 const useDraftWeek = (entries: ReturnType<typeof entry>[] = []) => {
   server.use(
     http.get("/api/workspaces/1/time-entries", () => HttpResponse.json({
@@ -47,6 +53,7 @@ const useDraftWeek = (entries: ReturnType<typeof entry>[] = []) => {
       entries,
     })),
     http.get("/api/workspaces/1/timesheets/2025-03-10/status", () => HttpResponse.json({ weekStart: "2025-03-10", status: "draft", portions: [] })),
+    http.get("/api/workspaces/1/timesheets/2025-03-10/completeness", () => HttpResponse.json(completeness(entries.reduce((total, item) => total + item.durationMinutes, 0)))),
     http.get("/api/workspaces/1/projects", () => HttpResponse.json({ projects: [project("11", "Northstar redesign")] })),
   );
 };
@@ -70,7 +77,7 @@ describe("inline time entry", () => {
     await screen.findByRole("heading", { name: "Log your hours" });
     await user.click(screen.getAllByRole("button", { name: "Add row" })[0]);
 
-    const duration = screen.getByLabelText(/Northstar redesign on Mon/);
+    const duration = screen.getByLabelText(/Northstar redesign on .*Mon/);
     await user.type(duration, "7:30{Enter}");
 
     await waitFor(() => expect(createCount).toBe(1));
@@ -97,7 +104,7 @@ describe("inline time entry", () => {
 
     const user = userEvent.setup();
     render(<TimesheetPage workspace={workspace} accessToken="token" />);
-    const duration = await screen.findByLabelText(/Northstar redesign on Mon/);
+    const duration = await screen.findByLabelText(/Northstar redesign on .*Mon/);
     await user.clear(duration);
     await user.type(duration, "2:15{Enter}");
     await waitFor(() => expect(patchCount).toBe(1));
@@ -108,7 +115,7 @@ describe("inline time entry", () => {
     await user.clear(duration);
     fireEvent.blur(duration);
     await waitFor(() => expect(deleteCount).toBe(1));
-    expect(screen.queryByLabelText(/Northstar redesign on Mon/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Northstar redesign on .*Mon/)).not.toBeInTheDocument();
   });
 
   it("keeps invalid input in place and explains the required h:mm format", async () => {
@@ -123,7 +130,7 @@ describe("inline time entry", () => {
     render(<TimesheetPage workspace={workspace} accessToken="token" />);
     await screen.findByRole("heading", { name: "Log your hours" });
     await user.click(screen.getAllByRole("button", { name: "Add row" })[0]);
-    const duration = screen.getByLabelText(/Northstar redesign on Mon/);
+    const duration = screen.getByLabelText(/Northstar redesign on .*Mon/);
     await user.type(duration, "1:75{Enter}");
 
     expect(await screen.findByText("Enter time as h:mm, for example 7:30.")).toBeInTheDocument();
@@ -153,7 +160,7 @@ describe("inline time entry", () => {
     render(<TimesheetPage workspace={workspace} accessToken="token" />);
     await screen.findByRole("heading", { name: "Log your hours" });
     await user.click(screen.getAllByRole("button", { name: "Add row" })[0]);
-    const duration = screen.getByLabelText(/Northstar redesign on Mon/);
+    const duration = screen.getByLabelText(/Northstar redesign on .*Mon/);
     await user.type(duration, "4:00{Enter}");
 
     expect(await screen.findByText("Saving is temporarily unavailable.")).toBeInTheDocument();
@@ -175,6 +182,7 @@ describe("member review status", () => {
     server.use(
       http.get("/api/workspaces/1/time-entries", () => HttpResponse.json({ weekStart: "2025-03-10", status: "partially_approved", totalMinutes: 180, billableMinutes: 180, entries })),
       http.get("/api/workspaces/1/projects", () => HttpResponse.json({ projects: [project("11", "Northstar redesign"), project("12", "Cedar & Co. website"), project("13", "Atlas product audit")] })),
+      http.get("/api/workspaces/1/timesheets/2025-03-10/completeness", () => HttpResponse.json(completeness(180))),
       http.get("/api/workspaces/1/timesheets/2025-03-10/status", () => HttpResponse.json({
         weekStart: "2025-03-10",
         status: "partially_approved",
@@ -199,6 +207,7 @@ describe("member review status", () => {
     server.use(
       http.get("/api/workspaces/1/time-entries", () => HttpResponse.json({ weekStart: "2025-03-10", status: "draft", totalMinutes: 0, billableMinutes: 0, entries: [] })),
       http.get("/api/workspaces/1/projects", () => HttpResponse.json({ projects: [project("11", "Northstar redesign")] })),
+      http.get("/api/workspaces/1/timesheets/2025-03-10/completeness", () => HttpResponse.json(completeness())),
       http.get("/api/workspaces/1/timesheets/2025-03-10/status", () => HttpResponse.json({ error: { code: "unavailable", internalReason: "Database failover" } }, { status: 500 })),
     );
     render(<TimesheetPage workspace={workspace} accessToken="token" />);

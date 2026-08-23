@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { loadNotifications, markAllNotificationsRead, markNotificationRead, type WorkflowNotification } from "../api/client";
 import type { IconName, PageKey } from "../types/navigation";
 import type { WorkspaceSummary } from "../types/workspace";
+import tempoLedgerLogo from "../assets/tempoledger-logo.svg";
 import { Icon } from "./Icon";
 
 type NavItem = { label: PageKey; icon: IconName; badge?: string };
@@ -15,7 +16,7 @@ function Sidebar({ activePage, onSelect, open, onClose, workspace, pendingApprov
   const workspaceItems = role === "member" ? commonItems : [...commonItems, { label: "Approvals" as const, icon: "check" as const, ...(pendingApprovalCount > 0 ? { badge: String(pendingApprovalCount) } : {}) }];
   const manageItems: NavItem[] = role === "admin" ? [{ label: "Members", icon: "users" }, { label: "Settings", icon: "settings" }] : [];
   const renderItems = (items: NavItem[]) => items.map((item) => <button key={item.label} className={`nav-item ${activePage === item.label ? "nav-item--active" : ""}`} type="button" onClick={() => { onSelect(item.label); onClose(); }}><Icon name={item.icon} /><span>{item.label}</span>{item.badge && <b aria-label={`${item.badge} pending approvals`}>{item.badge}</b>}</button>);
-  return <aside className={`sidebar ${open ? "sidebar--open" : ""}`}><div className="brand"><span className="brand-mark">T</span><strong>tempo<span>ledger</span></strong></div><button className="workspace-switcher" type="button"><span>{workspace.name.slice(0, 2).toUpperCase()}</span><div><strong>{workspace.name}</strong><small>{role} workspace</small></div><Icon name="chevron" size={15} /></button><label className="sidebar-search"><Icon name="search" size={18} /><input placeholder="Search..." /></label><nav aria-label="Main navigation"><p className="nav-label">WORKSPACE</p>{renderItems(workspaceItems)}{manageItems.length > 0 && <><div className="nav-divider" /><p className="nav-label">MANAGE</p>{renderItems(manageItems)}</>}</nav><div className="sidebar-footer"><button type="button"><Icon name="help" size={17} /> Help center</button><small>TempoLedger v1.0</small></div></aside>;
+  return <aside className={`sidebar ${open ? "sidebar--open" : ""}`}><div className="brand"><img src={tempoLedgerLogo} alt="" /><strong>Tempo<span>Ledger</span></strong></div><button className="workspace-switcher" type="button"><span>{workspace.name.slice(0, 2).toUpperCase()}</span><div><strong>{workspace.name}</strong><small>{role} workspace</small></div><Icon name="chevron" size={15} /></button><label className="sidebar-search"><Icon name="search" size={18} /><input placeholder="Search..." /></label><nav aria-label="Main navigation"><p className="nav-label">WORKSPACE</p>{renderItems(workspaceItems)}{manageItems.length > 0 && <><div className="nav-divider" /><p className="nav-label">MANAGE</p>{renderItems(manageItems)}</>}</nav><div className="sidebar-footer"><button type="button"><Icon name="help" size={17} /> Help center</button><small>TempoLedger v1.0</small></div></aside>;
 }
 
 function Topbar({ onOpenSidebar, userEmail, workspaceId, accessToken, onNavigate }: { onOpenSidebar: () => void; userEmail: string; workspaceId: string; accessToken: string; onNavigate: (path: string) => void }) {

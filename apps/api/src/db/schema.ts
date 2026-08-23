@@ -96,18 +96,47 @@ export const authSessions = pgTable(
   ],
 );
 
+export const clients = pgTable(
+  "clients",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    isArchived: boolean("is_archived").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("clients_workspace_name_unique").on(table.workspaceId, table.name),
+    index("clients_workspace_archived_index").on(table.workspaceId, table.isArchived),
+    check("clients_name_not_empty", sql`length(trim(${table.name})) > 0`),
+  ],
+);
+
 export const projects = pgTable(
   "projects",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    clientId: bigint("client_id", { mode: "number" }).references(() => clients.id, { onDelete: "set null" }),
     name: text("name").notNull(),
     approverMembershipId: bigint("approver_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
+    hourlyRateCents: integer("hourly_rate_cents"),
+    rateCurrency: text("rate_currency"),
+    budgetMinutes: integer("budget_minutes"),
+    budgetCents: integer("budget_cents"),
+    budgetCurrency: text("budget_currency"),
     isArchived: boolean("is_archived").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("projects_workspace_archived_index").on(table.workspaceId, table.isArchived)],
+  (table) => [
+    index("projects_workspace_archived_index").on(table.workspaceId, table.isArchived),
+    index("projects_client_index").on(table.clientId),
+    check("projects_rate_valid", sql`(${table.hourlyRateCents} is null and ${table.rateCurrency} is null) or (${table.hourlyRateCents} >= 0 and ${table.rateCurrency} ~ '^[A-Z]{3}$')`),
+    check("projects_budget_minutes_valid", sql`${table.budgetMinutes} is null or ${table.budgetMinutes} > 0`),
+    check("projects_budget_cents_valid", sql`(${table.budgetCents} is null and ${table.budgetCurrency} is null) or (${table.budgetCents} >= 0 and ${table.budgetCurrency} ~ '^[A-Z]{3}$')`),
+  ],
 );
 
 export const tasks = pgTable(
@@ -286,6 +315,43 @@ export const timesheetReviewEntrySnapshots = pgTable(
   (table) => [
     check("timesheet_review_entry_snapshots_duration_positive", sql`${table.durationMinutes} > 0`),
     index("timesheet_review_entry_snapshots_revision_index").on(table.revisionId, table.workDate),
+  ],
+);
+
+// These records describe the weekly expectation; they never change recorded time.
+export const workspaceTimePolicies = pgTable(
+  "workspace_time_policies",
+  {
+    workspaceId: bigint("workspace_id", { mode: "number" }).primaryKey().references(() => workspaces.id, { onDelete: "cascade" }),
+    expectedWeeklyMinutes: integer("expected_weekly_minutes").notNull().default(2400),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [check("workspace_time_policies_expected_weekly_minutes_valid", sql`${table.expectedWeeklyMinutes} > 0 and ${table.expectedWeeklyMinutes} <= 10080 and mod(${table.expectedWeeklyMinutes}, 5) = 0`)],
+);
+
+export const timeExpectancyExceptions = pgTable(
+  "time_expectancy_exceptions",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    membershipId: bigint("membership_id", { mode: "number" }).references(() => workspaceMemberships.id, { onDelete: "cascade" }),
+    workDate: date("work_date", { mode: "string" }).notNull(),
+    type: text("type").notNull(),
+    name: text("name").notNull(),
+    durationMinutes: integer("duration_minutes").notNull(),
+    createdByMembershipId: bigint("created_by_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("time_expectancy_exceptions_workspace_date_index").on(table.workspaceId, table.workDate),
+    uniqueIndex("time_expectancy_exceptions_public_holiday_unique").on(table.workspaceId, table.workDate).where(sql`${table.type} = 'public_holiday'`),
+    uniqueIndex("time_expectancy_exceptions_membership_date_unique").on(table.workspaceId, table.membershipId, table.workDate).where(sql`${table.type} = 'leave'`),
+    check("time_expectancy_exceptions_type_valid", sql`${table.type} in ('public_holiday', 'leave')`),
+    check("time_expectancy_exceptions_scope_valid", sql`(${table.type} = 'public_holiday' and ${table.membershipId} is null) or (${table.type} = 'leave' and ${table.membershipId} is not null)`),
+    check("time_expectancy_exceptions_name_not_empty", sql`length(trim(${table.name})) > 0`),
+    check("time_expectancy_exceptions_duration_valid", sql`${table.durationMinutes} > 0 and ${table.durationMinutes} <= 1440`),
   ],
 );
 

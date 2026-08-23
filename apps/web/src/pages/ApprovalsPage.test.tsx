@@ -35,11 +35,11 @@ describe("approval inbox", () => {
     const user = userEvent.setup();
     const { onPendingCountChange } = renderPage("admin");
 
-    expect(await screen.findByText("Atlas")).toBeInTheDocument();
-    expect(screen.queryByText("Beacon")).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Open Atlas" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Beacon" })).not.toBeInTheDocument();
     expect(onPendingCountChange).toHaveBeenLastCalledWith(1);
     await user.click(screen.getByRole("button", { name: "History" }));
-    expect(screen.getByText("Beacon")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open Beacon" })).toBeInTheDocument();
   });
 
   it("offers recovery for an API error and a clear empty actionable state", async () => {
@@ -109,6 +109,7 @@ describe("approval detail actions", () => {
     const user = userEvent.setup();
     renderPage("manager", "101");
     await user.click(await screen.findByRole("button", { name: "Approve" }));
+    await user.click(screen.getByRole("button", { name: "Confirm" }));
     expect(await screen.findByText("This approval changed while you were reviewing it. Refresh and try again.")).toBeInTheDocument();
   });
 });
