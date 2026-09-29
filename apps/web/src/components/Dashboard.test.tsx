@@ -31,6 +31,13 @@ describe("role-aware navigation", () => {
     expect(await screen.findByText("Approvals")).toBeInTheDocument();
     expect(screen.getByText("Members")).toBeInTheDocument();
     expect(screen.getByText("Settings")).toBeInTheDocument();
+    expect(screen.getByText("Billing")).toBeInTheDocument();
+  });
+
+  it.each(["member", "manager"] as const)("denies the Billing route to a %s", async (role) => {
+    renderDashboard(role, "/billing");
+    expect(await screen.findByRole("heading", { name: "Access denied" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Billing" })).not.toBeInTheDocument();
   });
 
   it("renders empty and error workspace states", async () => {
