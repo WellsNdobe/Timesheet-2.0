@@ -10,6 +10,7 @@ import { workflowRouter } from "./workflow/routes.js";
 import { reportsRouter } from "./reports/routes.js";
 import { reportExportRouter } from "./reports/exportRoutes.js";
 import { completenessRouter } from "./completeness/routes.js";
+import { billingRouter } from "./billing/routes.js";
 import { withRequestDatabase } from "./db/client.js";
 
 type AppOptions = { databaseConnectionString?: string | (() => string) };
@@ -51,6 +52,7 @@ export const createApp = (options: AppOptions = {}) => {
   app.use("/api", reportsRouter);
   app.use("/api", reportExportRouter);
   app.use("/api", completenessRouter);
+  app.use("/api", billingRouter);
   app.use(notFoundHandler);
   app.use(errorHandler);
   return app;

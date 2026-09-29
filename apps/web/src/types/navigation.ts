@@ -1,4 +1,4 @@
-export type PageKey = "Overview" | "Time entries" | "Projects" | "Reports" | "Approvals" | "Members" | "Settings";
+export type PageKey = "Overview" | "Time entries" | "Projects" | "Reports" | "Billing" | "Approvals" | "Members" | "Settings";
 
 export type IconName =
   | "grid"

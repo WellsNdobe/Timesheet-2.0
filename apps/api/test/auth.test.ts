@@ -97,12 +97,15 @@ beforeAll(async () => {
   const { migrate } = await import("drizzle-orm/node-postgres/migrator");
 
   db = clientModule.db;
-  pool = clientModule.pool;
+  pool = clientModule.getPool();
   app = appModule.app;
   await migrate(db, { migrationsFolder });
 });
 
 beforeEach(async () => {
+  await db.delete(schema.billingBatchEntries);
+  await db.delete(schema.billingBatches);
+  await db.delete(schema.projectRates);
   await db.delete(schema.idempotencyOperations);
   await db.delete(schema.workflowNotifications);
   await db.delete(schema.workspaceAuditEvents);
@@ -114,6 +117,7 @@ beforeEach(async () => {
   await db.delete(schema.weeklyTimesheets);
   await db.delete(schema.tasks);
   await db.delete(schema.projects);
+  await db.delete(schema.clients);
   await db.delete(schema.workspaceInvitations);
   await db.delete(schema.workspaceMemberships);
   await db.delete(schema.workspaces);
@@ -773,5 +777,144 @@ describe.sequential("remaining approval workflow", () => {
     expect(missingInvitationKey.body.error.code).toBe("invalid_idempotency_key");
     expect(malformedProjectKey.status).toBe(400);
     expect(malformedProjectKey.body.error.code).toBe("invalid_idempotency_key");
+  });
+});
+
+describe.sequential("billing handoff", () => {
+  const approvedWork = async () => {
+    const fixture = await createRoleFixture();
+    const [client] = await db.insert(schema.clients).values({ workspaceId: fixture.workspaceId, name: "Agency client" }).returning();
+    await db.update(schema.projects).set({ clientId: client.id }).where(eq(schema.projects.id, fixture.assignedProject.id));
+    const rateUrl = `/api/workspaces/${fixture.workspaceId}/projects/${fixture.assignedProject.id}/rates`;
+    const firstRate = await request(app).post(rateUrl).set(auth(fixture.admin.token)).send({ effectiveFrom: "2026-08-01", hourlyRateCents: 10000, currency: "ZAR", reason: "Initial agreement" });
+    expect(firstRate.status).toBe(201);
+    const secondRate = await request(app).post(rateUrl).set(auth(fixture.admin.token)).send({ effectiveFrom: "2026-08-04", hourlyRateCents: 20000, currency: "ZAR", reason: "New agreement" });
+    expect(secondRate.status).toBe(201);
+    const entries = await db.insert(schema.timeEntries).values([
+      { workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-03", durationMinutes: 30, isBillable: true, description: "=SUM(A1:A2)" },
+      { workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-05", durationMinutes: 45, isBillable: true },
+      { workspaceId: fixture.workspaceId, membershipId: fixture.member.membership.id, projectId: fixture.assignedProject.id, workDate: "2026-08-04", durationMinutes: 30, isBillable: false },
+    ]).returning();
+    const submitUrl = `/api/workspaces/${fixture.workspaceId}/timesheets/2026-08-03/submit`;
+    const submitted = await request(app).post(submitUrl).set(auth(fixture.member.token)).send({});
+    expect(submitted.status).toBe(200);
+    const initial = submitted.body.revisions[0];
+    const returned = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${initial.approvalItemId}/revisions/${initial.revisionId}/request-changes`).set(auth(fixture.manager.token)).send({ comment: "Correct Wednesday" });
+    expect(returned.status).toBe(200);
+    const edited = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/time-entries/${entries[1].id}`).set(auth(fixture.member.token)).send({ durationMinutes: 60 });
+    expect(edited.status).toBe(200);
+    const resubmitted = await request(app).post(submitUrl).set(auth(fixture.member.token)).send({});
+    expect(resubmitted.status).toBe(200);
+    const latest = resubmitted.body.revisions[0];
+    const approved = await request(app).post(`/api/workspaces/${fixture.workspaceId}/approval-items/${latest.approvalItemId}/revisions/${latest.revisionId}/approve`).set(auth(fixture.manager.token)).send({});
+    expect(approved.status).toBe(200);
+    return { ...fixture, client, rateUrl, latest };
+  };
+  const unbilledUrl = (workspaceId: number) => `/api/workspaces/${workspaceId}/billing/unbilled?dateFrom=2026-08-01&dateTo=2026-08-31`;
+  const selection = (rows: { snapshotId: number; fingerprint: string }[]) => ({ entries: rows.map(({ snapshotId, fingerprint }) => ({ snapshotId, fingerprint })) });
+
+  it("prices the latest approved revision by work date, preserves exports and prevents double billing", async () => {
+    const fixture = await approvedWork();
+    const unbilled = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    expect(unbilled.status).toBe(200);
+    expect(unbilled.body.entries).toHaveLength(2);
+    expect(unbilled.body.entries.map((entry: { amountCents: number }) => entry.amountCents)).toEqual([5000, 20000]);
+    expect(unbilled.body.entries.every((entry: { revisionId: number }) => entry.revisionId === Number(fixture.latest.revisionId))).toBe(true);
+    const endpoint = `/api/workspaces/${fixture.workspaceId}/billing/batches`;
+    const body = selection(unbilled.body.entries);
+    const key = "00000000-0000-4000-8000-999999999001";
+    const [saved, retried] = await Promise.all([
+      request(app).post(endpoint).set(idempotentAuth(fixture.admin.token, key)).send(body),
+      request(app).post(endpoint).set(idempotentAuth(fixture.admin.token, key)).send(body),
+    ]);
+    expect(saved.status).toBe(201); expect(retried.status).toBe(201);
+    expect(saved.body.batch.id).toBe(retried.body.batch.id);
+    expect(saved.body.batch.totalCents).toBe(25000);
+    expect(saved.body.batch.totalMinutes).toBe(90);
+    const repeated = await request(app).post(endpoint).set(idempotentAuth(fixture.admin.token)).send(body);
+    expect(repeated.status).toBe(409);
+    const differentPayload = await request(app).post(endpoint).set(idempotentAuth(fixture.admin.token, key)).send({ entries: body.entries.slice(0, 1) });
+    expect(differentPayload.status).toBe(409);
+    expect((await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token))).body.entries).toHaveLength(0);
+    const csvUrl = `${endpoint}/${saved.body.batch.id}/export.csv`;
+    const originalCsv = await request(app).get(csvUrl).set(auth(fixture.admin.token));
+    expect(originalCsv.status).toBe(200);
+    expect(originalCsv.text).toContain("'=SUM(A1:A2)");
+    await db.update(schema.projects).set({ name: "Renamed project" }).where(eq(schema.projects.id, fixture.assignedProject.id));
+    await db.update(schema.clients).set({ name: "Renamed client" }).where(eq(schema.clients.id, fixture.client.id));
+    const futureRate = await request(app).post(fixture.rateUrl).set(auth(fixture.admin.token)).send({ effectiveFrom: "2026-09-01", hourlyRateCents: 30000, currency: "USD", reason: "New contract" });
+    expect(futureRate.status).toBe(201);
+    const projectList = await request(app).get(`/api/workspaces/${fixture.workspaceId}/projects`).set(auth(fixture.admin.token));
+    const valuedProject = projectList.body.projects.find((project: { id: string }) => project.id === String(fixture.assignedProject.id));
+    expect(valuedProject.commercial.valuesByCurrency).toEqual({ ZAR: 25000 });
+    const handedOff = await request(app).patch(`${endpoint}/${saved.body.batch.id}/handoff`).set(auth(fixture.admin.token)).send({ invoiceReference: "INV-104" });
+    expect(handedOff.status).toBe(200);
+    expect(handedOff.body.batch.invoiceReference).toBe("INV-104");
+    expect(handedOff.body.batch.handedOffAt).toBeTruthy();
+    expect((await request(app).get(csvUrl).set(auth(fixture.admin.token))).text).toBe(originalCsv.text);
+    for (const actor of [fixture.member, fixture.manager]) {
+      expect((await request(app).get(csvUrl).set(auth(actor.token))).status).toBe(403);
+      expect((await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(actor.token))).status).toBe(403);
+      expect((await request(app).get(fixture.rateUrl).set(auth(actor.token))).status).toBe(403);
+      expect((await request(app).post(endpoint).set(idempotentAuth(actor.token)).send(body)).status).toBe(403);
+    }
+    const foreignExport = await request(app).get(`/api/workspaces/${fixture.managerPersonalWorkspaceId}/billing/batches/${saved.body.batch.id}/export.csv`).set(auth(fixture.manager.token));
+    expect(foreignExport.status).toBe(404);
+    const managerEdit = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/projects/${fixture.assignedProject.id}`).set(auth(fixture.manager.token)).send({ name: "Manager's project name" });
+    expect(managerEdit.status).toBe(200);
+    expect(managerEdit.body.project.commercial).toBeUndefined();
+  });
+
+  it("rejects stale selections and backdated changes to billed work", async () => {
+    const fixture = await approvedWork();
+    const before = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    const endpoint = `/api/workspaces/${fixture.workspaceId}/billing/batches`;
+    // Client changes are material even when the hours and rates are unchanged.
+    const [other] = await db.insert(schema.clients).values({ workspaceId: fixture.workspaceId, name: "New customer" }).returning();
+    await db.update(schema.projects).set({ clientId: other.id }).where(eq(schema.projects.id, fixture.assignedProject.id));
+    const stale = await request(app).post(endpoint).set(idempotentAuth(fixture.admin.token)).send(selection(before.body.entries));
+    expect(stale.status).toBe(409);
+    const fresh = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    const saved = await request(app).post(endpoint).set(idempotentAuth(fixture.admin.token)).send(selection(fresh.body.entries));
+    expect(saved.status).toBe(201);
+    const overwrite = await request(app).post(fixture.rateUrl).set(auth(fixture.admin.token)).send({ effectiveFrom: "2026-08-04", hourlyRateCents: 30000, currency: "ZAR", reason: "Overwrite" });
+    expect(overwrite.status).toBe(409);
+    const overlapsBilled = await request(app).post(fixture.rateUrl).set(auth(fixture.admin.token)).send({ effectiveFrom: "2026-08-05", hourlyRateCents: 30000, currency: "ZAR", reason: "Backdate into billed work" });
+    expect(overlapsBilled.status).toBe(409);
+    expect(overlapsBilled.body.error.code).toBe("rate_overlaps_billed_work");
+    const directPatch = await request(app).patch(`/api/workspaces/${fixture.workspaceId}/projects/${fixture.assignedProject.id}`).set(auth(fixture.admin.token)).send({ hourlyRateCents: 30000, rateCurrency: "ZAR" });
+    expect(directPatch.status).toBe(400);
+  });
+
+  it("keeps currencies separate and serialises competing finalisation requests", async () => {
+    const fixture = await approvedWork();
+    await db.update(schema.projectRates).set({ currency: "USD" }).where(and(eq(schema.projectRates.projectId, fixture.assignedProject.id), eq(schema.projectRates.effectiveFrom, "2026-08-04")));
+    const result = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    const endpoint = `/api/workspaces/${fixture.workspaceId}/billing/batches`;
+    const mixed = await request(app).post(endpoint).set(idempotentAuth(fixture.admin.token)).send(selection(result.body.entries));
+    expect(mixed.status).toBe(400);
+    expect(mixed.body.error.code).toBe("mixed_billing_batch");
+    const oneCurrency = selection(result.body.entries.slice(0, 1));
+    const results = await Promise.all([
+      request(app).post(endpoint).set(idempotentAuth(fixture.admin.token)).send(oneCurrency),
+      request(app).post(endpoint).set(idempotentAuth(fixture.admin.token)).send(oneCurrency),
+    ]);
+    expect(results.map((response) => response.status).sort()).toEqual([201, 409]);
+  });
+
+  it("blocks missing and legacy rates until a confirmed dated rate covers the work", async () => {
+    const fixture = await approvedWork();
+    await db.delete(schema.projectRates).where(eq(schema.projectRates.projectId, fixture.assignedProject.id));
+    const missing = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    expect(missing.body.entries.every((entry: { issue: string }) => entry.issue === "Add a rate covering this work date")).toBe(true);
+    await db.insert(schema.projectRates).values({ projectId: fixture.assignedProject.id, effectiveFrom: "0001-01-01", hourlyRateCents: 10000, currency: "ZAR", isLegacy: true, reason: "Imported" });
+    const legacy = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    const blocked = await request(app).post(`/api/workspaces/${fixture.workspaceId}/billing/batches`).set(idempotentAuth(fixture.admin.token)).send(selection(legacy.body.entries));
+    expect(blocked.status).toBe(400);
+    expect(blocked.body.error.code).toBe("billing_not_ready");
+    const confirmed = await request(app).post(fixture.rateUrl).set(auth(fixture.admin.token)).send({ effectiveFrom: "2026-08-01", hourlyRateCents: 0, currency: "ZAR", reason: "Confirmed zero rate" });
+    expect(confirmed.status).toBe(201);
+    const ready = await request(app).get(unbilledUrl(fixture.workspaceId)).set(auth(fixture.admin.token));
+    expect(ready.body.entries.every((entry: { issue: string | null; amountCents: number }) => entry.issue === null && entry.amountCents === 0)).toBe(true);
   });
 });

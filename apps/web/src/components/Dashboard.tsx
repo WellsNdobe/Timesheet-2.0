@@ -7,13 +7,14 @@ import { OverviewPage } from "../pages/OverviewPage";
 import { PlaceholderPage } from "../pages/PlaceholderPage";
 import { ProjectsPage } from "../pages/ProjectsPage";
 import { ReportsPage } from "../pages/ReportsPage";
+import { BillingPage } from "../pages/BillingPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TimesheetPage } from "../pages/TimesheetPage";
 import type { PageKey } from "../types/navigation";
 import type { WorkspaceSummary } from "../types/workspace";
 import { DashboardLayout } from "./DashboardLayout";
 
-const routes: Record<string, PageKey> = { "/": "Overview", "/time-entries": "Time entries", "/projects": "Projects", "/reports": "Reports", "/approvals": "Approvals", "/members": "Members", "/settings": "Settings" };
+const routes: Record<string, PageKey> = { "/": "Overview", "/time-entries": "Time entries", "/projects": "Projects", "/reports": "Reports", "/billing": "Billing", "/approvals": "Approvals", "/members": "Members", "/settings": "Settings" };
 const paths = Object.fromEntries(Object.entries(routes).map(([path, page]) => [page, path])) as Record<PageKey, string>;
 type State = { status: "loading" | "empty" | "error" } | { status: "ready"; workspace: WorkspaceSummary; pendingCount: number };
 
@@ -31,7 +32,7 @@ export function Dashboard({ accessToken, userEmail, path, onNavigate }: { access
   if (state.status !== "ready") return null;
   const readyState = state;
   const pathname = path.split("?")[0]; const approvalMatch = pathname.match(/^\/approvals\/([^/]+)$/); const unknownPath = routes[pathname] === undefined && !approvalMatch; const activePage = approvalMatch ? "Approvals" : routes[pathname] ?? "Overview"; const role = readyState.workspace.membership.role;
-  const forbidden = (activePage === "Approvals" && role === "member") || (["Members", "Settings"] as PageKey[]).includes(activePage) && role !== "admin";
+  const forbidden = (activePage === "Approvals" && role === "member") || (["Members", "Settings", "Billing"] as PageKey[]).includes(activePage) && role !== "admin";
   return <DashboardLayout activePage={activePage} onSelectPage={(page) => onNavigate(paths[page])} onNavigate={onNavigate} accessToken={accessToken} workspace={readyState.workspace} pendingApprovalCount={readyState.pendingCount} userEmail={userEmail}>{(onLogTime) => {
     if (unknownPath) return <AccessStatePage title="Page not found" message="The requested page does not exist in this workspace." />;
     if (forbidden) return <AccessStatePage title="Access denied" message="Your workspace role does not allow access to this page." />;
@@ -41,6 +42,7 @@ export function Dashboard({ accessToken, userEmail, path, onNavigate }: { access
     if (activePage === "Members") return <MembersPage workspace={readyState.workspace} accessToken={accessToken} onNavigate={onNavigate} />;
     if (activePage === "Projects") return <ProjectsPage workspace={readyState.workspace} accessToken={accessToken} />;
     if (activePage === "Reports") return <ReportsPage workspace={readyState.workspace} accessToken={accessToken} />;
+    if (activePage === "Billing") return <BillingPage workspace={readyState.workspace} accessToken={accessToken} />;
     if (activePage === "Settings") return <SettingsPage workspace={readyState.workspace} accessToken={accessToken} />;
     return <PlaceholderPage page={activePage} />;
   }}</DashboardLayout>;

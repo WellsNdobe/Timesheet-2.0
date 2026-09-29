@@ -139,6 +139,23 @@ export const projects = pgTable(
   ],
 );
 
+// Rates are append-only. A work date uses the last rate effective on that date.
+export const projectRates = pgTable("project_rates", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  projectId: bigint("project_id", { mode: "number" }).notNull().references(() => projects.id),
+  effectiveFrom: date("effective_from", { mode: "string" }).notNull(),
+  hourlyRateCents: integer("hourly_rate_cents").notNull(),
+  currency: text("currency").notNull(),
+  isLegacy: boolean("is_legacy").notNull().default(false),
+  reason: text("reason").notNull(),
+  createdByMembershipId: bigint("created_by_membership_id", { mode: "number" }).references(() => workspaceMemberships.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  uniqueIndex("project_rates_project_date_unique").on(table.projectId, table.effectiveFrom),
+  check("project_rates_amount_valid", sql`${table.hourlyRateCents} >= 0 and ${table.hourlyRateCents} <= 100000000`),
+  check("project_rates_currency_valid", sql`${table.currency} ~ '^[A-Z]{3}$'`),
+]);
+
 export const tasks = pgTable(
   "tasks",
   {
@@ -317,6 +334,54 @@ export const timesheetReviewEntrySnapshots = pgTable(
     index("timesheet_review_entry_snapshots_revision_index").on(table.revisionId, table.workDate),
   ],
 );
+
+export const billingBatches = pgTable("billing_batches", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id),
+  clientId: bigint("client_id", { mode: "number" }).notNull().references(() => clients.id),
+  clientName: text("client_name").notNull(),
+  currency: text("currency").notNull(),
+  totalMinutes: integer("total_minutes").notNull(),
+  totalCents: bigint("total_cents", { mode: "number" }).notNull(),
+  entryCount: integer("entry_count").notNull(),
+  dateFrom: date("date_from", { mode: "string" }).notNull(),
+  dateTo: date("date_to", { mode: "string" }).notNull(),
+  idempotencyKey: uuid("idempotency_key").notNull(),
+  requestFingerprint: text("request_fingerprint").notNull(),
+  createdByMembershipId: bigint("created_by_membership_id", { mode: "number" }).notNull().references(() => workspaceMemberships.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  invoiceReference: text("invoice_reference"),
+  handedOffAt: timestamp("handed_off_at", { withTimezone: true }),
+}, (table) => [
+  uniqueIndex("billing_batches_request_unique").on(table.workspaceId, table.idempotencyKey),
+  index("billing_batches_workspace_id_index").on(table.workspaceId, table.id),
+  check("billing_batches_totals_valid", sql`${table.totalMinutes} > 0 and ${table.totalCents} >= 0 and ${table.entryCount} > 0`),
+]);
+
+export const billingBatchEntries = pgTable("billing_batch_entries", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  batchId: bigint("batch_id", { mode: "number" }).notNull().references(() => billingBatches.id),
+  workspaceId: bigint("workspace_id", { mode: "number" }).notNull().references(() => workspaces.id),
+  snapshotId: bigint("snapshot_id", { mode: "number" }).notNull().references(() => timesheetReviewEntrySnapshots.id),
+  sourceEntryId: bigint("source_entry_id", { mode: "number" }).notNull(),
+  revisionId: bigint("revision_id", { mode: "number" }).notNull().references(() => timesheetApprovalRevisions.id),
+  projectId: bigint("project_id", { mode: "number" }).notNull().references(() => projects.id),
+  projectName: text("project_name").notNull(),
+  memberEmail: text("member_email").notNull(),
+  taskName: text("task_name"),
+  description: text("description"),
+  workDate: date("work_date", { mode: "string" }).notNull(),
+  durationMinutes: integer("duration_minutes").notNull(),
+  rateId: bigint("rate_id", { mode: "number" }).notNull().references(() => projectRates.id),
+  hourlyRateCents: integer("hourly_rate_cents").notNull(),
+  amountCents: bigint("amount_cents", { mode: "number" }).notNull(),
+}, (table) => [
+  uniqueIndex("billing_batch_entries_source_unique").on(table.workspaceId, table.sourceEntryId),
+  uniqueIndex("billing_batch_entries_snapshot_unique").on(table.snapshotId),
+  index("billing_batch_entries_batch_index").on(table.batchId),
+  index("billing_batch_entries_project_date_index").on(table.projectId, table.workDate),
+  check("billing_batch_entries_amount_valid", sql`${table.durationMinutes} > 0 and ${table.hourlyRateCents} >= 0 and ${table.amountCents} >= 0`),
+]);
 
 // These records describe the weekly expectation; they never change recorded time.
 export const workspaceTimePolicies = pgTable(
